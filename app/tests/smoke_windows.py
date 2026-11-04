@@ -3,6 +3,7 @@
 import gzip
 import json
 import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -88,7 +89,8 @@ def check_launch(core):
     check(status == 409 and "EULA" in reply["error"], f"{core}: без EULA панель не запускает сервер")
 
     config = json.loads((DATA / "config.json").read_text("utf-8"))
-    java = next((DATA / "java" / str(config["java_major"])).rglob("java.exe"))
+    # Если подходящая Java уже есть в системе, панель не скачивает свою
+    java = next((DATA / "java" / str(config["java_major"])).rglob("java.exe"), None) or shutil.which("java")
     print(f"{core}: {java}, запуск {config['launch']}", flush=True)
     if core in ("forge", "neoforge"):
         check(config["launch"][0].endswith("win_args.txt"), f"{core}: запуск через win_args.txt, как в run.bat")
