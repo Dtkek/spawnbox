@@ -437,6 +437,12 @@ def _set_aside_client_mods(log):
     return sorted(path.name for path in client_only)
 
 
+def mods_java_major():
+    """Какая Java нужна скопированным модам. Сборка могла работать в лаунчере на Java новее той,
+    что Mojang указывает для этой версии Minecraft, а старая Java уронит сервер при запуске."""
+    return max((installer.jar_java_major(path) for path in _mod_paths(SERVER_DIR)), default=0)
+
+
 def _copy_world(source, log):
     name = _free_world_name(source.name)
     log(f"[панель] Копирую мир «{source.name}», это может занять время…")

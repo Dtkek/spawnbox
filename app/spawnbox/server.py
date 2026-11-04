@@ -294,7 +294,13 @@ class Server:
         def work():
             self._install_core(core, version, loader, "before-import")
             importer.apply(path, world, nick, self.cfg["allow_cracked"], self.emit)
-            # После копирования: папка mods заменяется целиком
+            needed = importer.mods_java_major()
+            if needed > self.cfg["java_major"]:
+                major = installer.nearest_java(needed)
+                self.emit(f"[панель] Модам сборки нужна Java {needed}, ставлю Java {major}")
+                installer.ensure_java(major, self.emit)
+                self.cfg.update(java_major=major)
+            # После копирования: папка mods заменяется целиком, а версия мода зависит от Java
             self.refresh_auth_plugins()
             memory = max(self.cfg["memory_gb"], min(IMPORT_MEMORY_GB, max(1, total_memory_gb() - 2)))
             self.cfg.update(memory_gb=memory, pack_name=name)
@@ -305,7 +311,7 @@ class Server:
     def refresh_auth_plugins(self):
         """Без лицензии нужен вход по паролю: на Paper и Fabric ставим его сами."""
         if self.cfg["allow_cracked"] and self.cfg["core"] in installer.AUTH_PLUGINS:
-            installer.install_auth_plugins(self.cfg["core"], self.cfg["version"], self.emit)
+            installer.install_auth_plugins(self.cfg["core"], self.cfg["version"], self.cfg["java_major"], self.emit)
 
     def auth_warning(self):
         core = self.cfg["core"]

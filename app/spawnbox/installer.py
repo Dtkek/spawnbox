@@ -34,6 +34,11 @@ AUTH_PLUGINS = {
     "fabric": ("mods", {"easyauth": "EasyAuth.jar", "fabric-api": "fabric-api.jar"}),
 }
 
+JAVA_LTS = (8, 11, 17, 21, 25)
+JAVA_CLASS_OFFSET = 44  # версия файла класса 61 — это Java 17
+JAR_CLASS_SAMPLE = 500
+MAX_BUILD_ATTEMPTS = 10
+
 # Файлы ядра: при смене версии удаляются, а миры, плагины и настройки остаются
 RUNTIME_NAMES = {"libraries", "versions", "cache", ".fabric", "server.jar", "run.sh", "run.bat",
                  "user_jvm_args.txt"}
@@ -260,7 +265,50 @@ def install(core, version, log, before_replace, loader=None):
     return {"core": core, "version": version, "java_major": major, "launch": launch}
 
 
-def install_auth_plugins(core, version, log):
+def jar_java_major(path):
+    """Какая Java нужна jar-файлу, по версии его классов. 0 — не удалось понять."""
+    highest = 0
+    try:
+        with zipfile.ZipFile(path) as jar:
+            # META-INF/versions — это необязательные классы для более новых версий Java
+            names = [n for n in jar.namelist() if n.endswith(".class") and not n.startswith("META-INF/")]
+            for name in names[:JAR_CLASS_SAMPLE]:
+                with jar.open(name) as file:
+                    head = file.read(8)
+                if head[:4] == b"\xca\xfe\xba\xbe":
+                    highest = max(highest, int.from_bytes(head[6:8], "big") - JAVA_CLASS_OFFSET)
+    except (OSError, zipfile.BadZipFile, RuntimeError):
+        pass
+    return highest
+
+
+def nearest_java(major):
+    """Temurin выпускает только версии с долгой поддержкой, а они подходят и для более старых классов."""
+    return next((lts for lts in JAVA_LTS if lts >= major), JAVA_LTS[-1])
+
+
+def _install_compatible_build(builds, target, java_major, log):
+    """Ставит самую новую сборку, которая запустится на Java сервера: новые версии модов
+    для старого Minecraft бывают собраны под более новую Java и роняют сервер."""
+    for build in builds[:MAX_BUILD_ATTEMPTS]:
+        files = build["files"]
+        if not files:
+            continue
+        file = next((f for f in files if f["primary"]), files[0])
+        candidate = CACHE_DIR / target.name
+        download(file["url"], candidate, "sha1", file["hashes"]["sha1"])
+        needed = jar_java_major(candidate)
+        if needed <= java_major:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(candidate, target)
+            log(f"[панель] Поставил {target.name}, версия {build.get('version_number', '?')}")
+            return True
+        log(f"[панель] {target.name} {build.get('version_number', '?')} требует Java {needed}, пробую версию старше")
+        candidate.unlink(missing_ok=True)
+    return False
+
+
+def install_auth_plugins(core, version, java_major, log):
     """Ставит вход по паролю для Paper и Fabric. Возвращает список файлов, которые не нашлись."""
     missing = []
     folder, plugins = AUTH_PLUGINS[core]
@@ -274,13 +322,8 @@ def install_auth_plugins(core, version, log):
                                         "game_versions": json.dumps([version])})
         try:
             builds = fetch_json(f"{MODRINTH.format(slug=slug)}?{query}")
-            if not builds:
+            if not _install_compatible_build(builds, target / name, java_major, log):
                 missing.append(name)
-                continue
-            files = builds[0]["files"]
-            file = next((f for f in files if f["primary"]), files[0])
-            log(f"[панель] Ставлю {name}…")
-            download(file["url"], target / name, "sha1", file["hashes"]["sha1"])
         except NetError as error:
             log(f"[панель] {error}")
             missing.append(name)

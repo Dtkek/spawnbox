@@ -140,6 +140,8 @@ def check_import():
     check(state["warning"] is None, "fabric: вход по паролю установлен")
     mods = sorted(path.name for path in (SERVER / "mods").glob("*.jar"))
     print("моды:", mods, flush=True)
+    _, log = call(ADMIN, "GET", "/api/state?since=0")
+    print("\n".join(line for line in log["log"] if "EasyAuth" in line or "fabric-api" in line), flush=True)
     check("EasyAuth.jar" in mods and "fabric-api.jar" in mods, "EasyAuth и Fabric API на месте")
     check((SERVER / "mods_client_only" / "client-only.jar").exists(), "клиентский мод отложен")
     check((SERVER / "Novyy_mir" / "level.dat").exists(), "мир скопирован под латинским именем")

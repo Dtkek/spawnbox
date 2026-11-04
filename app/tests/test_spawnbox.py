@@ -567,6 +567,111 @@ def write_mod(path, core="forge", version="[1.20.1,1.21)", client=False):
                                f'modId="minecraft"\nversionRange="{version}"\n')
 
 
+def write_classes(path, *java_majors):
+    """Jar с классами под указанные версии Java."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as jar:
+        for index, major in enumerate(java_majors):
+            jar.writestr(f"a/C{index}.class", b"\xca\xfe\xba\xbe\x00\x00" + struct.pack(">H", major + 44))
+        jar.writestr("META-INF/versions/99/x.class", b"\xca\xfe\xba\xbe\x00\x00" + struct.pack(">H", 99 + 44))
+
+
+class JavaLevelTests(Base):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp(prefix="spawnbox-java-"))
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        real_download = installer.download
+        self.addCleanup(setattr, installer, "download", real_download)
+        self.jars = {}
+
+        def fake_download(url, dest, *args):
+            shutil.copy(self.jars[url], dest)
+        installer.download = fake_download
+        self.lines = []
+
+    def build(self, version, *majors):
+        path = self.temp / f"{version}.jar"
+        write_classes(path, *majors)
+        self.jars[version] = path
+        return {"version_number": version, "files": [{"url": version, "primary": True, "hashes": {"sha1": "0"}}]}
+
+    def test_jar_java_major(self):
+        path = self.temp / "a.jar"
+        write_classes(path, 8, 17, 21)
+        self.assertEqual(installer.jar_java_major(path), 21, "META-INF/versions не считается")
+        (self.temp / "broken.jar").write_bytes(b"not a zip")
+        self.assertEqual(installer.jar_java_major(self.temp / "broken.jar"), 0)
+
+    def test_nearest_java(self):
+        self.assertEqual([installer.nearest_java(m) for m in (8, 16, 17, 18, 21, 22, 25, 30)], [8, 17, 17, 21, 21, 25, 25, 25])
+
+    def test_newest_compatible_build_is_chosen(self):
+        builds = [self.build("3.4.4", 8, 17, 21), {"version_number": "empty", "files": []}, self.build("3.3.6", 8, 17),
+                  self.build("3.2.1", 17)]
+        target = self.temp / "out" / "EasyAuth.jar"
+        self.assertTrue(installer._install_compatible_build(builds, target, 17, self.lines.append))
+        self.assertEqual(installer.jar_java_major(target), 17)
+        self.assertTrue(any("3.3.6" in line for line in self.lines))
+        self.assertFalse((installer.CACHE_DIR / "EasyAuth.jar").exists(), "временный файл убран")
+
+    def test_newest_build_on_newer_java(self):
+        target = self.temp / "out" / "EasyAuth.jar"
+        builds = [self.build("3.4.4", 8, 17, 21), self.build("3.3.6", 8, 17)]
+        self.assertTrue(installer._install_compatible_build(builds, target, 21, self.lines.append))
+        self.assertEqual(installer.jar_java_major(target), 21)
+
+    def test_no_compatible_build(self):
+        target = self.temp / "out" / "EasyAuth.jar"
+        self.assertFalse(installer._install_compatible_build([self.build("3.4.4", 21)], target, 17, self.lines.append))
+        self.assertFalse(target.exists())
+
+    def test_import_raises_java_for_mods(self):
+        source = self.temp / "pack"
+        write_classes(source / "mods" / "new-mod.jar", 21)
+        real_install, real_ensure, real_auth = installer.install, installer.ensure_java, installer.install_auth_plugins
+        self.addCleanup(setattr, installer, "install", real_install)
+        self.addCleanup(setattr, installer, "ensure_java", real_ensure)
+        self.addCleanup(setattr, installer, "install_auth_plugins", real_auth)
+        installer.install = lambda core, version, log, before, loader=None: (
+            before() or {"core": core, "version": version, "java_major": 17, "launch": ["-jar", "x.jar"]})
+        asked, auth = [], []
+        installer.ensure_java = lambda major, log: asked.append(major)
+        installer.install_auth_plugins = lambda core, version, java, log: auth.append(java)
+        real_post = importer.post_json
+        self.addCleanup(setattr, importer, "post_json", real_post)
+        importer.post_json = lambda url, body: {}
+        self.addCleanup(shutil.rmtree, SERVER_DIR / "mods", True)
+        self.mc.import_pack(str(source), "fabric", "1.20.1", None, None, "", "x")
+        self.assertTrue(wait_for(lambda: not self.mc.task))
+        self.assertIsNone(self.mc.last_error)
+        self.assertEqual(asked, [21])
+        self.assertEqual(self.cfg["java_major"], 21)
+        self.assertEqual(auth, [21], "мод для входа подбирается уже под новую Java")
+        self.cfg.update(pack_name="", memory_gb=4)
+
+    def test_import_keeps_java_when_mods_fit(self):
+        source = self.temp / "pack"
+        write_classes(source / "mods" / "ok.jar", 8, 17)
+        real_install, real_ensure, real_auth = installer.install, installer.ensure_java, installer.install_auth_plugins
+        self.addCleanup(setattr, installer, "install", real_install)
+        self.addCleanup(setattr, installer, "ensure_java", real_ensure)
+        self.addCleanup(setattr, installer, "install_auth_plugins", real_auth)
+        installer.install = lambda core, version, log, before, loader=None: (
+            before() or {"core": core, "version": version, "java_major": 17, "launch": ["-jar", "x.jar"]})
+        asked = []
+        installer.ensure_java = lambda major, log: asked.append(major)
+        installer.install_auth_plugins = lambda core, version, java, log: []
+        real_post = importer.post_json
+        self.addCleanup(setattr, importer, "post_json", real_post)
+        importer.post_json = lambda url, body: {}
+        self.addCleanup(shutil.rmtree, SERVER_DIR / "mods", True)
+        self.mc.import_pack(str(source), "fabric", "1.20.1", None, None, "", "x")
+        self.assertTrue(wait_for(lambda: not self.mc.task))
+        self.assertEqual(asked, [])
+        self.assertEqual(self.cfg["java_major"], 17)
+        self.cfg.update(pack_name="", memory_gb=4)
+
+
 class ImporterTests(Base):
     def setUp(self):
         self.source = Path(tempfile.mkdtemp(prefix="spawnbox-pack-"))
