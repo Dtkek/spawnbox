@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spawnbox</title>
+<style>
+:root { --bg: #15171a; --panel: #1d2024; --panel-2: #262a2f; --line: #33383e; --text: #e8e9ea; --muted: #9aa1a9; --accent: #5fb85a; --accent-ink: #0c1a0b; --warn: #e0a83c; --danger: #e5645a; --sleep: #6aa7e8; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, "Segoe UI", sans-serif; display: grid; place-items: center; padding: 16px; }
+.card { width: min(440px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px; display: grid; gap: 14px; }
+.brand { font-weight: 700; font-size: 18px; display: flex; align-items: center; gap: 10px; }
+.brand i { width: 18px; height: 18px; background: var(--accent); display: block; box-shadow: inset -5px -5px 0 #3e8a3a; }
+.state { font-size: 24px; font-weight: 600; display: flex; align-items: center; gap: 12px; }
+.state::before { content: ""; width: 13px; height: 13px; border-radius: 50%; background: var(--dot, var(--muted)); }
+.muted { color: var(--muted); font-size: 14.5px; margin: 0; }
+.addr { font: 15px ui-monospace, Consolas, Menlo, monospace; background: var(--bg); padding: 8px 12px; border-radius: 7px; border: 1px solid var(--line); overflow-wrap: anywhere; }
+button, input { font: inherit; border-radius: 8px; padding: 11px 14px; border: 1px solid var(--line); }
+input { background: var(--bg); color: var(--text); width: 100%; }
+button { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; cursor: pointer; width: 100%; }
+button:disabled { opacity: .45; cursor: default; }
+.error { color: var(--danger); font-size: 14.5px; margin: 0; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="brand"><i></i>Spawnbox</div>
+
+  <form id="login" hidden style="display:grid;gap:12px">
+    <p class="muted">Введи код доступа, который тебе выдал владелец сервера.</p>
+    <input id="code" autocomplete="off" placeholder="Код доступа" aria-label="Код доступа">
+    <button>Войти</button>
+  </form>
+
+  <div id="panel" hidden style="display:grid;gap:14px">
+    <div class="state" id="state">…</div>
+    <p class="muted" id="details"></p>
+    <button id="start">Запустить сервер</button>
+    <div>
+      <p class="muted" style="margin-bottom:4px">Адрес для игры</p>
+      <div class="addr" id="address"></div>
+    </div>
+    <p class="muted" id="auth" hidden>При первом входе в игре напиши <b>/register пароль пароль</b>, а потом заходи через <b>/login пароль</b>.</p>
+  </div>
+
+  <p class="error" id="error" hidden></p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+// Код хранится только в этом браузере и уходит в заголовке, поэтому чужой сайт не сможет им воспользоваться
+const load = () => { try { return localStorage.getItem("code") || ""; } catch { return ""; } };
+const save = value => { try { localStorage.setItem("code", value); } catch {} };
+let code = load();
+
+if (location.hash.length > 1) {
+  code = decodeURIComponent(location.hash.slice(1));
+  save(code);
+  history.replaceState(null, "", location.pathname);
+}
+
+async function api(method, path) {
+  const response = await fetch(path, { method, headers: { "X-Access-Code": code } });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.error || "Ошибка запроса");
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
+function showError(text) {
+  $("error").textContent = text || "";
+  $("error").hidden = !text;
+}
+
+function showLogin() {
+  $("login").hidden = false;
+  $("panel").hidden = true;
+}
+
+const STATES = {
+  stopped: ["Сервер выключен", "--sleep"], starting: ["Запускается…", "--warn"],
+  running: ["Сервер работает", "--accent"], stopping: ["Выключается…", "--warn"],
+};
+
+function render(s) {
+  $("login").hidden = true;
+  $("panel").hidden = false;
+  const [label, color] = STATES[s.state];
+  $("state").textContent = label;
+  $("state").style.setProperty("--dot", `var(${color})`);
+  let details = s.installed ? `${s.core[0].toUpperCase()}${s.core.slice(1)} ${s.version}` : "Владелец ещё не настроил сервер";
+  if (s.state === "running") {
+    details += s.players.length ? ` · играют: ${s.players.join(", ")}` : " · пока никого нет";
+    if (s.idle_left !== null) details += ` · уснёт через ${Math.ceil(s.idle_left / 60)} мин, если никто не зайдёт`;
+  } else if (s.crashed) {
+    details += " · прошлый запуск завершился с ошибкой";
+  } else if (s.busy) {
+    details += ` · сейчас идёт: ${s.busy}`;
+  }
+  $("details").textContent = details;
+  $("start").hidden = s.state !== "stopped";
+  $("start").disabled = !s.installed || !s.eula || !!s.busy;
+  $("address").textContent = s.address;
+  $("auth").hidden = !s.password_login;
+}
+
+async function poll() {
+  if (!code) return showLogin();
+  try {
+    render(await api("GET", "/status"));
+    showError("");
+  } catch (error) {
+    if (error.status === 401) {
+      code = "";
+      save("");
+      showLogin();
+      showError("Неверный код или доступ отозван");
+    } else {
+      showError("Нет связи с сервером: возможно, компьютер владельца выключен");
+    }
+  }
+}
+
+$("login").addEventListener("submit", async event => {
+  event.preventDefault();
+  const typed = $("code").value.trim();
+  // В заголовке запроса браузер не отправит кириллицу, а в настоящем коде её не бывает
+  if (!/^[\w-]+$/.test(typed)) return showError("Неверный код");
+  code = typed;
+  save(code);
+  await poll();
+});
+
+$("start").addEventListener("click", async () => {
+  try {
+    await api("POST", "/start");
+    await poll();
+  } catch (error) {
+    showError(error.message);
+  }
+});
+
+setInterval(poll, 3000);
+poll();
+</script>
+</body>
+</html>

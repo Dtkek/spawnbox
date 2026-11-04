@@ -1,0 +1,1 @@
+"""Spawnbox — личный хостинг Minecraft."""
