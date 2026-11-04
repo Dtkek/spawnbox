@@ -517,6 +517,7 @@ class InstallerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     try:
-        unittest.main(verbosity=1, exit=False)
+        result = unittest.main(verbosity=1, exit=False).result
     finally:
         shutil.rmtree(TEMP, ignore_errors=True)
+    sys.exit(0 if result.wasSuccessful() else 1)

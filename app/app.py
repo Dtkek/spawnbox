@@ -6,9 +6,10 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 
-from spawnbox.config import Config
+from spawnbox.config import DATA, Config
 from spawnbox.gate import Gate
 from spawnbox.server import Server
 from spawnbox.web import serve_admin, serve_guest
@@ -42,6 +43,7 @@ def main():
     if sys.version_info < (3, 11):
         print("Нужен Python 3.11 или новее. Скачать: https://www.python.org/downloads/")
         return 1
+    print(f"Данные: {DATA}")
 
     cfg = Config()
     mc = Server(cfg)
@@ -84,4 +86,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    except Exception:
+        traceback.print_exc()
+        code = 1
+    # Иначе окно exe закроется раньше, чем получится прочитать ошибку
+    if code and getattr(sys, "frozen", False):
+        input("Нажми Enter, чтобы закрыть окно")
+    sys.exit(code)

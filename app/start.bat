@@ -3,11 +3,7 @@ chcp 65001 >nul
 title Spawnbox
 cd /d "%~dp0"
 
-rem В архиве с релиза Python лежит рядом, ставить его не нужно
-if exist "python\python.exe" (
-    "python\python.exe" app.py
-    goto done
-)
+rem Запуск из исходников. Обычным игрокам нужен готовый spawnbox.exe, Python для него не нужен
 where py >nul 2>nul
 if %errorlevel%==0 (
     py -3 app.py
@@ -18,7 +14,7 @@ if %errorlevel%==0 (
     python app.py
     goto done
 )
-echo Не найден Python. Скачай готовый архив Spawnbox без установки Python:
+echo Не найден Python. Скачай готовый spawnbox.exe, для него Python не нужен:
 echo     https://github.com/Dtkek/spawnbox/releases/latest
 echo или установи Python 3.11 и новее: https://www.python.org/downloads/
 

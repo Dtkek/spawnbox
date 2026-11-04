@@ -1,11 +1,20 @@
-"""Пути и настройки. Всё состояние лежит в data/ рядом с кодом (или в SPAWNBOX_DATA)."""
+"""Пути и настройки. Всё состояние лежит в одной папке, её можно задать через SPAWNBOX_DATA."""
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 
-APP_DIR = Path(__file__).resolve().parent.parent
-DATA = Path(os.environ.get("SPAWNBOX_DATA", APP_DIR / "data"))
+
+def _default_data():
+    # exe при каждом запуске распаковывается во временную папку. Данные живут отдельно,
+    # чтобы миры не зависели от того, куда положен сам файл и какой он версии
+    if getattr(sys, "frozen", False):
+        return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Spawnbox"
+    return Path(__file__).resolve().parent.parent / "data"
+
+
+DATA = Path(os.environ.get("SPAWNBOX_DATA", _default_data()))
 SERVER_DIR = DATA / "server"
 BACKUP_DIR = DATA / "backups"
 JAVA_DIR = DATA / "java"
