@@ -8,13 +8,15 @@ import time
 from collections import deque
 from contextlib import contextmanager
 
-from . import backups, files, installer
-from .config import SERVER_DIR
+from . import backups, files, importer, installer
+from .config import SERVER_DIR, total_memory_gb
 from .installer import CORES
 
 LOG_LINES = 3000
-STOP_TIMEOUT = 90
-SAVE_TIMEOUT = 120
+# Большой мир со сборкой сохраняется долго, а обрыв сохранения может его повредить
+STOP_TIMEOUT = 600
+SAVE_TIMEOUT = 600
+IMPORT_MEMORY_GB = 8
 BACKUP_RETRY_SECONDS = 1800
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -262,29 +264,54 @@ class Server:
         if core not in CORES:
             raise ServerError("Неизвестное ядро")
 
-        def before_replace():
-            changed = (core, version) != (self.cfg["core"], self.cfg["version"])
-            if changed and (SERVER_DIR / files.current_world() / "level.dat").exists():
-                self.emit("[панель] Делаю бэкап перед сменой версии…")
-                backups.create("before-update", self.cfg["core"], self.cfg["version"])
-            self.cfg.update(core=None, launch=None)
-
         def work():
-            self.cfg.update(**installer.install(core, version, self.emit, before_replace))
+            changed = (core, version) != (self.cfg["core"], self.cfg["version"])
+            self._install_core(core, version, None, "before-update" if changed else None)
             self.refresh_auth_plugins()
+            self.cfg.update(pack_name="")
 
         self.run_task(f"Установка {CORES[core]} {version}", work)
 
+    def _install_core(self, core, version, loader, backup_label):
+        def before_replace():
+            if backup_label and (SERVER_DIR / files.current_world() / "level.dat").exists():
+                self.emit("[панель] Делаю бэкап текущего мира…")
+                backups.create(backup_label, self.cfg["core"], self.cfg["version"])
+            self.cfg.update(core=None, launch=None)
+
+        self.cfg.update(**installer.install(core, version, self.emit, before_replace, loader))
+
+    def import_pack(self, path, core, version, loader, world, nick, name):
+        """Ставит нужное ядро и копирует сборку и мир."""
+        self.require_stopped()
+        if core not in CORES:
+            raise ServerError("Выбери ядро")
+        if not version:
+            raise ServerError("Укажи версию Minecraft")
+        if nick and not re.fullmatch(r"\w{1,16}", nick):
+            raise ServerError("Ник может содержать только латиницу, цифры и _, до 16 символов")
+
+        def work():
+            self._install_core(core, version, loader, "before-import")
+            importer.apply(path, world, nick, self.cfg["allow_cracked"], self.emit)
+            # После копирования: папка mods заменяется целиком
+            self.refresh_auth_plugins()
+            memory = max(self.cfg["memory_gb"], min(IMPORT_MEMORY_GB, max(1, total_memory_gb() - 2)))
+            self.cfg.update(memory_gb=memory, pack_name=name)
+            self.emit(f"[панель] Серверу выделено {memory} ГБ памяти, это можно изменить в настройках")
+
+        self.run_task("Импорт сборки", work)
+
     def refresh_auth_plugins(self):
-        """Без лицензии нужен вход по паролю: на Paper ставим его сами."""
-        if self.cfg["allow_cracked"] and self.cfg["core"] == "paper":
-            installer.install_auth_plugins(self.cfg["version"], self.emit)
+        """Без лицензии нужен вход по паролю: на Paper и Fabric ставим его сами."""
+        if self.cfg["allow_cracked"] and self.cfg["core"] in installer.AUTH_PLUGINS:
+            installer.install_auth_plugins(self.cfg["core"], self.cfg["version"], self.emit)
 
     def auth_warning(self):
         core = self.cfg["core"]
         if not core or not self.cfg["allow_cracked"] or files.has_password_login(core):
             return None
-        reason = ("Вход по паролю (AuthMe) не установлен для этой версии" if core == "paper"
+        reason = ("Вход по паролю не установлен для этой версии" if core in installer.AUTH_PLUGINS
                   else "На этом ядре нет входа по паролю")
         return (f"{reason}, поэтому любой может зайти под чужим ником. "
                 "Включи белый список и не выдавай права оператора.")

@@ -120,13 +120,50 @@ label.row input:not([type=checkbox]), label.row select { width: 100%; max-width:
         <select id="core">
           <option value="paper">Paper — плагины, вход по паролю</option>
           <option value="vanilla">Vanilla — обычный сервер</option>
-          <option value="fabric">Fabric — моды</option>
+          <option value="fabric">Fabric — моды, вход по паролю</option>
           <option value="forge">Forge — моды</option>
+          <option value="neoforge">NeoForge — моды</option>
         </select>
       </label>
       <label class="row">Версия Minecraft <select id="version"></select></label>
       <div class="line" style="margin-top:8px"><button class="primary" id="install">Установить</button></div>
-      <p class="hint">Панель сама скачает ядро и нужную Java. Миры, плагины и настройки останутся, а перед сменой версии будет сделан бэкап. На версию старше мира переходить нельзя: мир может не открыться.</p>
+      <p class="hint">Панель сама скачает ядро и нужную Java. Миры, плагины и настройки останутся, а перед сменой версии будет сделан бэкап. На версию старше мира переходить нельзя: мир может не открыться. Моды от другого ядра или версии нужно убрать, иначе сервер может не запуститься.</p>
+    </div>
+  </section>
+
+  <section data-tab="Импорт сборки" hidden>
+    <div style="display:grid;gap:16px">
+      <div class="card">
+        <h2>Откуда взять</h2>
+        <p class="hint" style="margin:0 0 10px">Укажи папку установленной сборки, в ней есть папки mods и saves. Подойдёт и один мир, и архив .zip. Исходные файлы не меняются: панель всё копирует.</p>
+        <form class="line" id="import-form">
+          <input type="text" id="import-path" placeholder="Например: C:\Users\Имя\curseforge\minecraft\Instances\MyPack" autocomplete="off">
+          <button type="button" id="import-pick-folder">Выбрать папку</button>
+          <button type="button" id="import-pick-zip">Выбрать архив</button>
+          <button class="primary">Проверить</button>
+        </form>
+      </div>
+      <div class="card" id="import-result" hidden>
+        <h2>Что будет импортировано</h2>
+        <div id="import-warnings"></div>
+        <p class="hint" id="import-summary" style="margin:0 0 8px"></p>
+        <label class="row">Ядро
+          <select id="import-core">
+            <option value="forge">Forge</option>
+            <option value="neoforge">NeoForge</option>
+            <option value="fabric">Fabric</option>
+            <option value="paper">Paper</option>
+            <option value="vanilla">Vanilla</option>
+          </select>
+        </label>
+        <label class="row">Версия Minecraft <input type="text" id="import-version" autocomplete="off"></label>
+        <label class="row">Версия ядра <input type="text" id="import-loader" placeholder="последняя стабильная" autocomplete="off"></label>
+        <label class="row">Мир <select id="import-world"></select></label>
+        <label class="row">Твой ник на сервере <input type="text" id="import-nick" maxlength="16" placeholder="чтобы перенести вещи из одиночной игры" autocomplete="off"></label>
+        <label class="row">Название сборки <input type="text" id="import-name" maxlength="80" autocomplete="off"></label>
+        <p class="hint">Моды и настройки текущего сервера заменятся, а его мир останется. Перед импортом панель сделает бэкап. Моды только для клиента будут отложены в папку mods_client_only.</p>
+        <div class="line" style="margin-top:8px"><button class="primary" id="import-run">Импортировать</button></div>
+      </div>
     </div>
   </section>
 
@@ -135,7 +172,7 @@ label.row input:not([type=checkbox]), label.row select { width: 100%; max-width:
       <div class="card">
         <h2>Игроки</h2>
         <label class="row">Пускать без лицензии <input type="checkbox" id="allow_cracked"></label>
-        <p class="hint">Если включено, зайти смогут все: и с лицензией, и без. Ник при этом никто не проверяет, поэтому на Paper панель ставит вход по паролю: <b>/register пароль пароль</b>, потом <b>/login пароль</b>. Выбери режим до начала игры: при его смене у игроков пропадут вещи и прогресс, потому что изменится их идентификатор.</p>
+        <p class="hint">Если включено, зайти смогут все: и с лицензией, и без. Ник при этом никто не проверяет, поэтому на Paper и Fabric панель ставит вход по паролю: <b>/register пароль пароль</b>, потом <b>/login пароль</b>. Выбери режим до начала игры: при его смене у игроков пропадут вещи и прогресс, потому что изменится их идентификатор.</p>
       </div>
       <div class="card">
         <h2>Хостинг</h2>
@@ -191,6 +228,14 @@ label.row input:not([type=checkbox]), label.row select { width: 100%; max-width:
 
   <section data-tab="Доступ для друзей" hidden>
     <div style="display:grid;gap:16px">
+      <div class="card">
+        <h2>Кто может запускать сервер</h2>
+        <label class="row">Любой, у кого есть ссылка <input type="checkbox" id="open_start"></label>
+        <p class="hint">Страница для друзей: <span class="addr" id="guest-link"></span>. Если выключить, понадобится личный код. На странице можно только смотреть статус и запускать сервер, плагины и консоль там недоступны. Сервер запустится, только пока этот компьютер включён и Spawnbox открыт.</p>
+        <label class="row">Где скачать сборку <input type="url" id="pack_url" placeholder="https://… (необязательно)" autocomplete="off"></label>
+        <p class="hint">Игрокам нужна такая же сборка, как на сервере. Ссылка появится на странице для друзей.</p>
+        <div class="line" style="margin-top:8px"><button class="primary" id="save-access">Сохранить</button></div>
+      </div>
       <div class="card">
         <h2>Выдать доступ</h2>
         <form class="line" id="guest-form">
@@ -283,6 +328,7 @@ function empty(text) {
 const loaders = {
   "Версия": loadVersions,
   "Настройки": () => { loadSettings(); loadProperties(); },
+  "Импорт сборки": null,
   "Плагины и моды": loadAddons,
   "Миры": loadWorlds,
   "Бэкапы": loadBackups,
@@ -314,7 +360,8 @@ function render(s) {
   if (!s.installed) { label = "Не установлен"; color = "--muted"; }
   $("pill").textContent = label;
   $("pill").style.setProperty("--dot", `var(${color})`);
-  $("about").textContent = s.installed ? `${s.core[0].toUpperCase()}${s.core.slice(1)} ${s.version}` : "";
+  const coreText = s.installed ? `${s.core[0].toUpperCase()}${s.core.slice(1)} ${s.version}` : "";
+  $("about").textContent = s.pack_name && s.installed ? `${s.pack_name} · ${coreText}` : coreText;
 
   const off = s.state === "stopped", busy = !!s.task;
   $("btn-start").hidden = !off;
@@ -410,9 +457,52 @@ $("install").addEventListener("click", act(async () => {
   await api("POST", "/api/install", { core: $("core").value, version });
 }));
 
+// --- Импорт сборки
+
+async function pickImportPath(kind) {
+  const { path } = await api("POST", "/api/import/pick", { kind });
+  if (!path) return;
+  $("import-path").value = path;
+  await scanImport();
+}
+
+async function scanImport() {
+  const scan = await api("POST", "/api/import/scan", { path: $("import-path").value });
+  $("import-warnings").replaceChildren(...scan.warnings.map(text => {
+    const div = document.createElement("div");
+    div.className = "banner warn";
+    div.style.marginBottom = "10px";
+    div.textContent = text;
+    return div;
+  }));
+  const from = scan.source ? ` Ядро определено: ${scan.source}.` : "";
+  $("import-summary").textContent = `Модов: ${scan.mods} (${size(scan.mods_size)}), миров: ${scan.worlds.length}.${from}`;
+  if (scan.core && [...$("import-core").options].some(o => o.value === scan.core)) $("import-core").value = scan.core;
+  $("import-version").value = scan.version || "";
+  $("import-loader").value = scan.loader || "";
+  $("import-name").value = scan.name || "";
+  $("import-world").replaceChildren(
+    ...scan.worlds.map(w => new Option(`${w.name} (${size(w.size)}${w.version ? ", " + w.version : ""})`, w.name)),
+    new Option("Не переносить мир", ""));
+  $("import-result").hidden = false;
+}
+
+$("import-form").addEventListener("submit", act(scanImport));
+$("import-pick-folder").addEventListener("click", act(() => pickImportPath("folder")));
+$("import-pick-zip").addEventListener("click", act(() => pickImportPath("zip")));
+$("import-run").addEventListener("click", act(async () => {
+  if (!confirm("Заменить моды и настройки сервера на эту сборку? Перед этим панель сделает бэкап.")) return;
+  await api("POST", "/api/import/run", {
+    path: $("import-path").value, core: $("import-core").value, version: $("import-version").value,
+    loader: $("import-loader").value, world: $("import-world").value, nick: $("import-nick").value,
+    name: $("import-name").value,
+  });
+  openTab("Сервер");
+}));
+
 // --- Настройки
 
-const NUMBERS = ["memory_gb", "idle_minutes", "backup_hours", "backup_keep"];
+const NUMBERS =["memory_gb", "idle_minutes", "backup_hours", "backup_keep"];
 const CHECKS = ["wake_on_join", "allow_cracked"];
 const TEXTS = ["public_game_address", "public_guest_url"];
 
@@ -584,7 +674,16 @@ $("backup-now").addEventListener("click", act(() => api("POST", "/api/backups"))
 
 // --- Доступ
 
+$("save-access").addEventListener("click", act(async () => {
+  await api("POST", "/api/settings", { open_start: $("open_start").checked, pack_url: $("pack_url").value });
+  toast("Сохранено");
+}));
+
 async function loadGuests() {
+  const settings = await api("GET", "/api/settings");
+  $("open_start").checked = settings.open_start;
+  $("pack_url").value = settings.pack_url;
+  $("guest-link").textContent = last.public_guest_url || last.lan_guest || "";
   const { guests } = await api("GET", "/api/guests");
   const list = guests.map(guest => row(guest.name, "Выдан " + new Date(guest.created * 1000).toLocaleDateString("ru-RU"),
     button("Отозвать", async () => {

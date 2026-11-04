@@ -1,4 +1,6 @@
-"""Проверка панелей, шлюза и бэкапов на заглушке сервера. Запуск: python tests/test_spawnbox.py"""
+"""Проверка панелей, шлюза, бэкапов и импорта на заглушке сервера. Запуск: python tests/test_spawnbox.py"""
+import gzip
+import hashlib
 import http.client
 import json
 import os
@@ -9,13 +11,14 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 
 TEMP = tempfile.mkdtemp(prefix="spawnbox-test-")
 os.environ["SPAWNBOX_DATA"] = TEMP
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from spawnbox import backups, files, gate, installer  # noqa: E402
+from spawnbox import backups, files, gate, importer, installer  # noqa: E402
 from spawnbox.config import BACKUP_DIR, SERVER_DIR, Config  # noqa: E402
 from spawnbox.gate import Gate, encode_string, encode_varint, packet  # noqa: E402
 from spawnbox.server import Server, ServerError  # noqa: E402
@@ -73,7 +76,7 @@ class Base(unittest.TestCase):
         cls.cfg = Config()
         cls.cfg.update(core="paper", version="1.21.11", java_major=21, launch=["-jar", "server.jar"], eula=True,
                        gate_port=free_port(), backend_port=free_port(), admin_port=free_port(),
-                       guest_port=free_port(), backup_hours=0, idle_minutes=0)
+                       guest_port=free_port(), backup_hours=0, idle_minutes=0, open_start=False)
         cls.mc = Server(cls.cfg)
         cls.mc._command = lambda: [sys.executable, FAKE]
         cls.gate = Gate(cls.mc, host="127.0.0.1")
@@ -94,7 +97,7 @@ class Base(unittest.TestCase):
         wait_for(lambda: self.mc.state == "stopped")
         self.mc.last_error = None
         self.cfg.update(eula=True, wake_on_join=True, idle_minutes=0, guests=[], allow_cracked=True, core="paper",
-                        launch=["-jar", "server.jar"])
+                        launch=["-jar", "server.jar"], open_start=False, version="1.21.11", java_major=21)
         (SERVER_DIR / "server.properties").unlink(missing_ok=True)
 
     def start_ready(self):
@@ -256,10 +259,13 @@ class ServerTests(Base):
                 self.mc.start()
 
     def test_auth_warning(self):
-        self.cfg.update(core="fabric")
+        self.cfg.update(core="forge")
         self.assertIn("нет входа по паролю", self.mc.auth_warning())
+        shutil.rmtree(SERVER_DIR / "mods", ignore_errors=True)
+        self.cfg.update(core="fabric")
+        self.assertIn("не установлен", self.mc.auth_warning())
         self.cfg.update(core="paper")
-        self.assertIn("AuthMe", self.mc.auth_warning())
+        self.assertIn("не установлен", self.mc.auth_warning())
         plugin = SERVER_DIR / "plugins" / "AuthMe.jar"
         plugin.parent.mkdir(exist_ok=True)
         plugin.write_bytes(b"PK")
@@ -494,6 +500,32 @@ class GuestApiTests(Base):
         code = self.make_code()
         self.assertNotIn(code, (Path(TEMP) / "config.json").read_text("utf-8"))
 
+    def test_open_start_works_without_code(self):
+        self.cfg.update(open_start=True)
+        status, data = self.guest_api("GET", "/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.guest_api("POST", "/start")[0], 200)
+        self.assertTrue(wait_for(lambda: self.mc.state == "running"))
+        self.assertTrue(any("запустил гость" in line for line in self.mc.log_since(0)[1]))
+
+    def test_open_start_still_rejects_wrong_code(self):
+        self.cfg.update(open_start=True)
+        self.assertEqual(self.guest_api("GET", "/status", "wrong-code")[0], 401)
+
+    def test_open_start_gives_no_admin_routes(self):
+        self.cfg.update(open_start=True)
+        for method, path in (("POST", "/api/command"), ("POST", "/api/import/run"), ("PUT", "/api/addons/x.jar")):
+            self.assertEqual(self.guest_api(method, path)[0], 404, path)
+
+    def test_pack_url_must_be_web_address(self):
+        status, _ = self.admin_api("POST", "/api/settings", {"pack_url": "javascript:alert(1)"})
+        self.assertEqual(status, 400)
+        status, _ = self.admin_api("POST", "/api/settings", {"pack_url": "https://example.com/pack"})
+        self.assertEqual(status, 200)
+        code = self.make_code()
+        self.assertEqual(self.guest_api("GET", "/status", code)[1]["pack_url"], "https://example.com/pack")
+        self.admin_api("POST", "/api/settings", {"pack_url": ""})
+
     def test_guest_cannot_start_without_eula(self):
         code = self.make_code()
         self.cfg.update(eula=False)
@@ -501,7 +533,324 @@ class GuestApiTests(Base):
         self.assertEqual(self.mc.state, "stopped")
 
 
+def nbt_string(name, value):
+    raw = value.encode()
+    return b"\x08" + struct.pack(">H", len(name)) + name.encode() + struct.pack(">H", len(raw)) + raw
+
+
+def nbt_compound(name, body):
+    return b"\x0a" + struct.pack(">H", len(name)) + name.encode() + body + b"\x00"
+
+
+def write_level(world, version="1.20.1", player=True):
+    """Настоящий формат level.dat: сверху служебные теги, чтобы проверить их пропуск."""
+    world.mkdir(parents=True, exist_ok=True)
+    skipped = (b"\x03\x00\x01i" + struct.pack(">i", 7)
+               + b"\x09\x00\x01l\x03" + struct.pack(">i", 2) + struct.pack(">ii", 1, 2)
+               + b"\x0c\x00\x01a" + struct.pack(">i", 1) + struct.pack(">q", 5))
+    inner = skipped + nbt_compound("Version", nbt_string("Name", version))
+    if player:
+        inner += nbt_compound("Player", nbt_string("Dimension", "overworld"))
+    (world / "level.dat").write_bytes(gzip.compress(nbt_compound("", nbt_compound("Data", inner))))
+
+
+def write_mod(path, core="forge", version="[1.20.1,1.21)", client=False):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as jar:
+        jar.writestr("name.txt", path.name)
+        if core == "fabric":
+            jar.writestr("fabric.mod.json", json.dumps({"depends": {"minecraft": ">=" + version},
+                                                        "environment": "client" if client else "*"}))
+        else:
+            name = "META-INF/neoforge.mods.toml" if core == "neoforge" else "META-INF/mods.toml"
+            jar.writestr(name, f'clientSideOnly={"true" if client else "false"}\n[[dependencies.x]]\n'
+                               f'modId="minecraft"\nversionRange="{version}"\n')
+
+
+class ImporterTests(Base):
+    def setUp(self):
+        self.source = Path(tempfile.mkdtemp(prefix="spawnbox-pack-"))
+        self.addCleanup(shutil.rmtree, self.source, True)
+        self.modrinth = importer.post_json
+        importer.post_json = lambda url, body: {}
+        self.addCleanup(setattr, importer, "post_json", self.modrinth)
+        for name in ("mods", "config", "kubejs", "mods_client_only"):
+            shutil.rmtree(SERVER_DIR / name, ignore_errors=True)
+        self.addCleanup(self.clean_worlds)
+
+    def clean_worlds(self):
+        for path in SERVER_DIR.iterdir():
+            if path.is_dir() and (path / "level.dat").exists():
+                shutil.rmtree(path)
+
+    def test_curseforge_instance(self):
+        (self.source / "mods").mkdir()
+        (self.source / "minecraftinstance.json").write_text(json.dumps(
+            {"gameVersion": "1.20.1", "baseModLoader": {"name": "forge-47.2.0", "minecraftVersion": "1.20.1"}}), "utf-8")
+        write_level(self.source / "saves" / "Новый мир")
+        result = importer.scan(str(self.source))
+        self.assertEqual((result["core"], result["version"], result["loader"]), ("forge", "1.20.1", "47.2.0"))
+        self.assertEqual(result["worlds"][0]["name"], "Новый мир")
+        self.assertEqual(result["worlds"][0]["version"], "1.20.1")
+
+    def test_prism_instance(self):
+        game = self.source / ".minecraft"
+        (game / "mods").mkdir(parents=True)
+        (self.source / "mmc-pack.json").write_text(json.dumps({"components": [
+            {"uid": "net.minecraft", "version": "1.21.1"}, {"uid": "net.neoforged", "version": "21.1.172"}]}), "utf-8")
+        result = importer.scan(str(self.source))
+        self.assertEqual((result["core"], result["version"], result["loader"]), ("neoforge", "1.21.1", "21.1.172"))
+        self.assertEqual(result["name"], self.source.name, "название берётся из папки сборки, а не .minecraft")
+
+    def test_launcher_versions_folder(self):
+        write_mod(self.source / "mods" / "a.jar", "forge")
+        folder = self.source / "versions" / "Forge 1.20.1"
+        folder.mkdir(parents=True)
+        (folder / "Forge 1.20.1.json").write_text(json.dumps(
+            {"inheritsFrom": "1.20.1", "libraries": [{"name": "net.minecraftforge:fmlloader:1.20.1-47.3.0"}]}), "utf-8")
+        result = importer.scan(str(self.source))
+        self.assertEqual((result["core"], result["version"], result["loader"]), ("forge", "1.20.1", "47.3.0"))
+
+    def test_fabric_version_file(self):
+        write_mod(self.source / "mods" / "a.jar", "fabric", "1.20.1")
+        folder = self.source / "versions" / "fabric-loader-0.16.0-1.20.1"
+        folder.mkdir(parents=True)
+        (folder / "x.json").write_text(json.dumps(
+            {"inheritsFrom": "1.20.1", "libraries": [{"name": "net.fabricmc:fabric-loader:0.16.0"}]}), "utf-8")
+        result = importer.scan(str(self.source))
+        self.assertEqual((result["core"], result["version"], result["loader"]), ("fabric", "1.20.1", "0.16.0"))
+
+    def test_detect_by_mods_only(self):
+        write_mod(self.source / "mods" / "a.jar", "neoforge", "[1.21,1.22)")
+        write_mod(self.source / "mods" / "b.jar", "neoforge", "[1.21.1,1.22)")
+        result = importer.scan(str(self.source))
+        self.assertEqual((result["core"], result["version"], result["loader"]), ("neoforge", "1.21.1", None))
+        self.assertTrue(any("проверь" in text for text in result["warnings"]))
+
+    def test_broken_files_do_not_break_scan(self):
+        (self.source / "mods").mkdir()
+        (self.source / "mods" / "broken.jar").write_bytes(b"not a zip")
+        write_level(self.source / "saves" / "ok")
+        (self.source / "saves" / "bad").mkdir()
+        (self.source / "saves" / "bad" / "level.dat").write_bytes(b"\x1f\x8bbroken")
+        result = importer.scan(str(self.source))
+        self.assertEqual(result["mods"], 1)
+        self.assertEqual({w["name"] for w in result["worlds"]}, {"ok", "bad"})
+
+    def test_quilt_and_export_warnings(self):
+        write_mod(self.source / "mods" / "a.jar", "fabric", "1.20.1")
+        (self.source / "mmc-pack.json").write_text(json.dumps({"components": [
+            {"uid": "net.minecraft", "version": "1.20.1"}, {"uid": "org.quiltmc.quilt-loader", "version": "0.26"}]}), "utf-8")
+        self.assertTrue(any("Quilt" in text for text in importer.scan(str(self.source))["warnings"]))
+
+    def test_missing_path_and_empty_folder(self):
+        with self.assertRaises(importer.ImportError_):
+            importer.scan(str(self.source / "нет"))
+        with self.assertRaises(importer.ImportError_):
+            importer.scan(str(self.source))
+        with self.assertRaises(importer.ImportError_):
+            importer.scan("")
+
+    def test_world_selected_directly(self):
+        (self.source / "mods").mkdir()
+        world = self.source / "saves" / "Мой"
+        write_level(world, "1.19.2")
+        write_level(self.source / "saves" / "Другой")
+        result = importer.scan(str(world))
+        self.assertEqual([w["name"] for w in result["worlds"]], ["Мой"])
+        self.assertEqual(result["version"], "1.19.2")
+
+    def test_zip_source_and_traversal(self):
+        archive = self.source / "pack.zip"
+        with zipfile.ZipFile(archive, "w") as out:
+            out.writestr("MyPack/mods/placeholder.txt", "x")
+            out.writestr("../../evil.txt", "x")
+        result = importer.scan(str(archive))
+        self.assertEqual(result["name"], "MyPack")
+        self.assertFalse((SERVER_DIR.parent / "evil.txt").exists())
+
+    def test_safe_world_names(self):
+        self.assertEqual(importer.safe_world_name("Новый мир"), "Novyy_mir")
+        self.assertEqual(importer.safe_world_name("My World!"), "My_World")
+        self.assertEqual(importer.safe_world_name("???"), "world")
+        self.assertEqual(importer.safe_world_name("con"), "con_world")
+        for name in ("Новый мир", "My World!", "???", "con", "ёж-123"):
+            files.check_name(importer.safe_world_name(name))
+
+    def test_neoforge_versions(self):
+        self.assertEqual(installer.neoforge_mc("21.1.172"), "1.21.1")
+        self.assertEqual(installer.neoforge_mc("20.4.237"), "1.20.4")
+        self.assertEqual(installer.neoforge_mc("21.0.5-beta"), "1.21")
+        self.assertEqual(installer.neoforge_mc("26.3.0.101"), "26.3")
+        self.assertEqual(installer.neoforge_mc("26.1.2.5-beta"), "26.1.2")
+
+    def test_offline_uuid_matches_java(self):
+        self.assertEqual(str(importer.offline_uuid("Notch")), "b50ad385-829d-3141-a216-7e7d7539ba7f")
+
+    def test_apply_copies_and_sets_aside_client_mods(self):
+        write_mod(self.source / "mods" / "server-mod.jar", "forge")
+        write_mod(self.source / "mods" / "client-mod.jar", "forge", client=True)
+        write_mod(self.source / "mods" / "sodium-1.0.jar", "forge")
+        write_mod(self.source / "mods" / "known-by-modrinth.jar", "forge")
+        (self.source / "mods" / "off.jar.disabled").write_bytes(b"x")
+        (self.source / "config").mkdir()
+        (self.source / "config" / "a.toml").write_text("x=1", "utf-8")
+        (self.source / "kubejs").mkdir()
+        (self.source / "options.txt").write_text("клиент", "utf-8")
+        world = self.source / "saves" / "Новый мир"
+        write_level(world)
+        (world / "session.lock").write_bytes(b"lock")
+        before = sorted(str(p) for p in self.source.rglob("*"))
+
+        digest = hashlib.sha512((self.source / "mods" / "known-by-modrinth.jar").read_bytes()).hexdigest()
+
+        importer.post_json = lambda url, body: {digest: {"project_id": "abc"}}
+        real_fetch = importer.fetch_json
+        self.addCleanup(setattr, importer, "fetch_json", real_fetch)
+        importer.fetch_json = lambda url: [{"id": "abc", "server_side": "unsupported"}]
+
+        lines = []
+        importer.apply(str(self.source), "Новый мир", "Steve", True, lines.append)
+
+        self.assertEqual(sorted(str(p) for p in self.source.rglob("*")), before, "исходная папка не меняется")
+        self.assertEqual(sorted(p.name for p in (SERVER_DIR / "mods").iterdir()), ["server-mod.jar"])
+        self.assertEqual(sorted(p.name for p in (SERVER_DIR / "mods_client_only").iterdir()),
+                         ["client-mod.jar", "known-by-modrinth.jar", "sodium-1.0.jar"])
+        self.assertTrue((SERVER_DIR / "config" / "a.toml").exists())
+        self.assertTrue((SERVER_DIR / "kubejs").is_dir())
+        self.assertFalse((SERVER_DIR / "options.txt").exists())
+        self.assertEqual(files.current_world(), "Novyy_mir")
+        copied = SERVER_DIR / "Novyy_mir"
+        self.assertFalse((copied / "session.lock").exists())
+        self.assertEqual(files.read_properties()["max-tick-time"], "-1")
+
+        saved = gzip.decompress((copied / "playerdata" / f"{importer.offline_uuid('Steve')}.dat").read_bytes())
+        self.assertEqual(saved[:3], b"\x0a\x00\x00", "у файла игрока корень без имени")
+        self.assertIn(b"Dimension", saved)
+        self.assertNotIn(b"Version", saved, "в файл игрока попадает только сам игрок")
+
+    def test_apply_keeps_existing_world_with_same_name(self):
+        write_level(SERVER_DIR / "myworld", "1.0")
+        write_level(self.source / "saves" / "myworld", "2.0")
+        importer.apply(str(self.source), "myworld", "", True, lambda line: None)
+        self.assertEqual(files.current_world(), "myworld_2")
+        self.assertEqual(importer.world_version(SERVER_DIR / "myworld"), "1.0")
+
+    def test_apply_uses_new_players_folder(self):
+        world = self.source / "saves" / "w"
+        write_level(world)
+        (world / "players").mkdir()
+        importer.apply(str(self.source), "w", "Steve", True, lambda line: None)
+        self.assertTrue((SERVER_DIR / "w" / "players" / "data" / f"{importer.offline_uuid('Steve')}.dat").exists())
+
+    def test_no_transfer_in_licensed_mode_or_without_player(self):
+        write_level(self.source / "saves" / "a")
+        write_level(self.source / "saves" / "b", player=False)
+        importer.apply(str(self.source), "a", "Steve", False, lambda line: None)
+        self.assertFalse((SERVER_DIR / "a" / "playerdata").exists())
+        importer.apply(str(self.source), "b", "Steve", True, lambda line: None)
+        self.assertFalse((SERVER_DIR / "b" / "playerdata").exists())
+
+    def test_unknown_world_rejected(self):
+        write_level(self.source / "saves" / "a")
+        with self.assertRaises(importer.ImportError_):
+            importer.apply(str(self.source), "../secret", "", True, lambda line: None)
+
+    def test_modrinth_failure_is_not_fatal(self):
+        write_mod(self.source / "mods" / "a.jar", "forge")
+
+        def down(url, body):
+            raise importer.NetError("нет сети")
+        importer.post_json = down
+        lines = []
+        importer.apply(str(self.source), None, "", True, lines.append)
+        self.assertTrue((SERVER_DIR / "mods" / "a.jar").exists())
+        self.assertTrue(any("Modrinth" in line for line in lines))
+
+    def test_auth_mods_survive_import_and_are_not_duplicated(self):
+        write_mod(self.source / "mods" / "fabric-api-0.92.2+1.20.1.jar", "fabric", "1.20.1")
+        real_install, real_fetch, real_download = installer.install, installer.fetch_json, installer.download
+        self.addCleanup(setattr, installer, "install", real_install)
+        self.addCleanup(setattr, installer, "fetch_json", real_fetch)
+        self.addCleanup(setattr, installer, "download", real_download)
+        installer.install = lambda core, version, log, before, loader=None: (
+            before() or {"core": core, "version": version, "java_major": 17, "launch": ["-jar", "x.jar"]})
+        asked = []
+
+        def fake_fetch(url):
+            asked.append(url)
+            return [{"files": [{"url": "http://x/y.jar", "primary": True, "hashes": {"sha1": "0"}}]}]
+
+        def fake_download(url, dest, *args):
+            Path(dest).parent.mkdir(exist_ok=True)
+            Path(dest).write_bytes(b"PK")
+        installer.fetch_json = fake_fetch
+        installer.download = fake_download
+        self.mc.import_pack(str(self.source), "fabric", "1.20.1", "0.16.0", None, "", "Сборка")
+        self.assertTrue(wait_for(lambda: not self.mc.task))
+        self.assertIsNone(self.mc.last_error)
+        names = sorted(p.name for p in (SERVER_DIR / "mods").iterdir())
+        self.assertEqual(names, ["EasyAuth.jar", "fabric-api-0.92.2+1.20.1.jar"], "второй Fabric API не нужен")
+        self.assertIsNone(self.mc.auth_warning())
+        self.assertEqual(len(asked), 1)
+        self.assertIn("easyauth", asked[0])
+        self.assertIn("fabric", asked[0])
+        self.cfg.update(pack_name="", memory_gb=4)
+
+    def test_api_full_flow(self):
+        write_mod(self.source / "mods" / "a.jar", "forge")
+        write_level(self.source / "saves" / "w")
+        real_install = installer.install
+        installer.install = lambda core, version, log, before, loader=None: (
+            before() or {"core": core, "version": version, "java_major": 17, "launch": ["-jar", "x.jar"]})
+        self.addCleanup(setattr, installer, "install", real_install)
+        status, scan = self.admin_api("POST", "/api/import/scan", {"path": str(self.source)})
+        self.assertEqual(status, 200)
+        self.assertEqual(scan["core"], "forge")
+        status, _ = self.admin_api("POST", "/api/import/run", {
+            "path": str(self.source), "core": "forge", "version": "1.20.1", "loader": "47.2.0",
+            "world": "w", "nick": "Steve", "name": "Моя сборка"})
+        self.assertEqual(status, 200)
+        self.assertTrue(wait_for(lambda: not self.mc.task))
+        self.assertIsNone(self.mc.last_error)
+        self.assertEqual(self.cfg["pack_name"], "Моя сборка")
+        self.assertEqual(files.current_world(), "w")
+        self.assertGreaterEqual(self.cfg["memory_gb"], 1)
+        self.cfg.update(pack_name="", memory_gb=4)
+
+    def test_api_rejects_bad_input_and_running_server(self):
+        status, _ = self.admin_api("POST", "/api/import/run", {"path": str(self.source), "core": "x", "version": "1"})
+        self.assertEqual(status, 409)
+        status, _ = self.admin_api("POST", "/api/import/run", {"path": str(self.source), "core": "forge", "version": ""})
+        self.assertEqual(status, 409)
+        status, _ = self.admin_api("POST", "/api/import/run", {
+            "path": str(self.source), "core": "forge", "version": "1.20.1", "nick": "bad nick!"})
+        self.assertEqual(status, 409)
+        self.start_ready()
+        status, _ = self.admin_api("POST", "/api/import/run", {"path": str(self.source), "core": "forge", "version": "1.20.1"})
+        self.assertEqual(status, 409)
+
+    def test_failed_import_reports_error(self):
+        real_install = installer.install
+
+        def fail(*args, **kwargs):
+            raise importer.NetError("нет сети")
+        installer.install = fail
+        self.addCleanup(setattr, installer, "install", real_install)
+        self.mc.import_pack(str(self.source), "forge", "1.20.1", None, None, "", "x")
+        self.assertTrue(wait_for(lambda: not self.mc.task))
+        self.assertIn("нет сети", self.mc.last_error)
+
+
 class InstallerTests(unittest.TestCase):
+    def test_neoforge_launch(self):
+        neo = SERVER_DIR / "libraries/net/neoforged/neoforge/21.1.172"
+        neo.mkdir(parents=True)
+        name = "win_args.txt" if os.name == "nt" else "unix_args.txt"
+        (neo / name).write_text("x")
+        self.addCleanup(shutil.rmtree, SERVER_DIR / "libraries", True)
+        self.assertEqual(installer.forge_launch(), [f"@libraries/net/neoforged/neoforge/21.1.172/{name}", "nogui"])
+
     def test_forge_launch_variants(self):
         shim = SERVER_DIR / "forge-1.20.1-47-shim.jar"
         shim.write_text("x")

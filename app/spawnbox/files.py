@@ -163,7 +163,11 @@ def check_addon_name(name):
 
 
 def has_password_login(core):
-    return core == "paper" and (SERVER_DIR / "plugins" / "AuthMe.jar").exists()
+    if core == "paper":
+        return (SERVER_DIR / "plugins" / "AuthMe.jar").exists()
+    if core == "fabric":
+        return any(path.name.lower().startswith("easyauth") for path in (SERVER_DIR / "mods").glob("*.jar"))
+    return False
 
 
 def list_addons(core):

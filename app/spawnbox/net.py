@@ -13,10 +13,10 @@ class NetError(Exception):
     pass
 
 
-def _curl(args, timeout):
+def _curl(args, timeout, data=None):
     command = ["curl", "-fsSL", "--retry", "2", "-A", USER_AGENT, *args]
     try:
-        return subprocess.run(command, capture_output=True, timeout=timeout, creationflags=NO_WINDOW)
+        return subprocess.run(command, capture_output=True, timeout=timeout, creationflags=NO_WINDOW, input=data)
     except FileNotFoundError:
         raise NetError("Не найден curl: он нужен для скачивания файлов") from None
     except subprocess.TimeoutExpired:
@@ -25,6 +25,14 @@ def _curl(args, timeout):
 
 def fetch_json(url, timeout=60):
     done = _curl([url], timeout)
+    if done.returncode:
+        raise NetError(f"Не удалось получить {url}: {done.stderr.decode(errors='replace').strip()}")
+    return json.loads(done.stdout)
+
+
+def post_json(url, body, timeout=60):
+    args = ["-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", url]
+    done = _curl(args, timeout, data=json.dumps(body).encode("utf-8"))
     if done.returncode:
         raise NetError(f"Не удалось получить {url}: {done.stderr.decode(errors='replace').strip()}")
     return json.loads(done.stdout)

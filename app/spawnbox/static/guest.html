@@ -41,6 +41,7 @@ button:disabled { opacity: .45; cursor: default; }
       <p class="muted" style="margin-bottom:4px">Адрес для игры</p>
       <div class="addr" id="address"></div>
     </div>
+    <p class="muted" id="pack" hidden></p>
     <p class="muted" id="auth" hidden>При первом входе в игре напиши <b>/register пароль пароль</b>, а потом заходи через <b>/login пароль</b>.</p>
   </div>
 
@@ -105,20 +106,31 @@ function render(s) {
   $("start").hidden = s.state !== "stopped";
   $("start").disabled = !s.installed || !s.eula || !!s.busy;
   $("address").textContent = s.address;
+  $("pack").hidden = !s.pack_name && !s.pack_url;
+  $("pack").textContent = `Для игры нужна сборка${s.pack_name ? " " + s.pack_name : ""}`;
+  if (s.pack_url) {
+    const link = document.createElement("a");
+    link.href = s.pack_url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.style.color = "var(--sleep)";
+    link.textContent = "скачать";
+    $("pack").append(": ", link);
+  }
   $("auth").hidden = !s.password_login;
 }
 
 async function poll() {
-  if (!code) return showLogin();
   try {
     render(await api("GET", "/status"));
     showError("");
   } catch (error) {
     if (error.status === 401) {
+      // Без кода ответ 401 значит только то, что владелец включил вход по коду
+      if (code) showError("Неверный код или доступ отозван");
       code = "";
       save("");
       showLogin();
-      showError("Неверный код или доступ отозван");
     } else {
       showError("Нет связи с сервером: возможно, компьютер владельца выключен");
     }
@@ -132,6 +144,7 @@ $("login").addEventListener("submit", async event => {
   if (!/^[\w-]+$/.test(typed)) return showError("Неверный код");
   code = typed;
   save(code);
+  showError("");
   await poll();
 });
 

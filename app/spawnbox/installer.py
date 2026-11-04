@@ -13,23 +13,31 @@ import zipfile
 from .config import CACHE_DIR, JAVA_DIR, SERVER_DIR
 from .net import NO_WINDOW, NetError, download, fetch_json
 
-CORES = {"paper": "Paper", "vanilla": "Vanilla", "fabric": "Fabric", "forge": "Forge"}
+CORES = {"paper": "Paper", "vanilla": "Vanilla", "fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge"}
 
 MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 PAPER = "https://fill.papermc.io/v3/projects/paper"
 FABRIC = "https://meta.fabricmc.net/v2/versions"
 FORGE_PROMOTIONS = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
 FORGE_MAVEN = "https://maven.minecraftforge.net/net/minecraftforge/forge"
+NEOFORGE_VERSIONS = "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge"
+NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
 ADOPTIUM = "https://api.adoptium.net/v3/binary/latest/{major}/ga/{os}/{arch}/jre/hotspot/normal/eclipse"
-MODRINTH = "https://api.modrinth.com/v2/project/{slug}/version"
+MODRINTH_API = "https://api.modrinth.com/v2"
+MODRINTH = MODRINTH_API + "/project/{slug}/version"
 
-# Плагины, без которых при online-mode=false любой зайдёт под чужим ником
-AUTH_PLUGINS = {"authmereloaded": "AuthMe.jar", "skinsrestorer": "SkinsRestorer.jar"}
+# Без входа по паролю при online-mode=false любой зайдёт под чужим ником.
+# Ядро: папка и моды {адрес на Modrinth: имя файла}. На Fabric EasyAuth нужен Fabric API,
+# а файлы модов из сборки могут называться иначе, поэтому они сверяются по началу имени
+AUTH_PLUGINS = {
+    "paper": ("plugins", {"authmereloaded": "AuthMe.jar", "skinsrestorer": "SkinsRestorer.jar"}),
+    "fabric": ("mods", {"easyauth": "EasyAuth.jar", "fabric-api": "fabric-api.jar"}),
+}
 
 # Файлы ядра: при смене версии удаляются, а миры, плагины и настройки остаются
 RUNTIME_NAMES = {"libraries", "versions", "cache", ".fabric", "server.jar", "run.sh", "run.bat",
                  "user_jvm_args.txt"}
-RUNTIME_GLOBS = ("forge-*.jar", "fabric-server-*.jar")
+RUNTIME_GLOBS = ("forge-*.jar", "neoforge-*.jar", "fabric-server-*.jar")
 
 
 def java_os():
@@ -40,8 +48,29 @@ def java_arch():
     return "aarch64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
 
 
-def _version_key(version):
+def version_key(version):
     return [int(part) for part in version.split(".")]
+
+
+def neoforge_mc(build):
+    """Версия Minecraft по версии NeoForge: 21.1.172 — это 1.21.1, 21.0.5 — 1.21, 26.3.0.101 — 26.3."""
+    parts = build.split("-")[0].split(".")
+    if int(parts[0]) >= 26:
+        return ".".join(parts[:2]) if parts[2] == "0" else ".".join(parts[:3])
+    return f"1.{parts[0]}" if parts[1] == "0" else f"1.{parts[0]}.{parts[1]}"
+
+
+def _neoforge_builds():
+    """Сборки NeoForge без экспериментальных веток, у которых номер начинается с нуля."""
+    return [v for v in fetch_json(NEOFORGE_VERSIONS)["versions"] if not v.startswith("0.")]
+
+
+def _neoforge_latest(version):
+    builds = [v for v in _neoforge_builds() if neoforge_mc(v) == version]
+    if not builds:
+        raise NetError(f"Для версии {version} нет NeoForge")
+    stable = [v for v in builds if "-" not in v]
+    return (stable or builds)[-1]
 
 
 def list_versions(core):
@@ -57,8 +86,10 @@ def list_versions(core):
         promos = fetch_json(FORGE_PROMOTIONS)["promos"]
         found = {key.rsplit("-", 1)[0] for key in promos}
         # Установщики до 1.12 лежат по другим адресам и запускаются иначе
-        found = [v for v in found if re.fullmatch(r"\d+(\.\d+)+", v) and _version_key(v) >= [1, 12]]
-        return sorted(found, key=_version_key, reverse=True)
+        found = [v for v in found if re.fullmatch(r"\d+(\.\d+)+", v) and version_key(v) >= [1, 12]]
+        return sorted(found, key=version_key, reverse=True)
+    if core == "neoforge":
+        return sorted({neoforge_mc(v) for v in _neoforge_builds()}, key=version_key, reverse=True)
     raise NetError(f"Неизвестное ядро: {core}")
 
 
@@ -142,8 +173,8 @@ def _stable_first(items, flag="stable"):
     return next(item for item in items if item[flag])
 
 
-def _download_core(core, version, log):
-    """Скачивает файл ядра в кэш, не трогая текущую установку."""
+def _download_core(core, version, log, loader=None):
+    """Скачивает файл ядра в кэш, не трогая текущую установку. loader — точная версия ядра, если нужна."""
     target = CACHE_DIR / f"{core}-{version}.jar"
     log(f"[панель] Скачиваю {CORES[core]} {version}…")
     if core == "vanilla":
@@ -159,39 +190,45 @@ def _download_core(core, version, log):
         file = build["downloads"]["server:default"]
         return download(file["url"], target, "sha256", file["checksums"]["sha256"])
     if core == "fabric":
-        loader = _stable_first(fetch_json(f"{FABRIC}/loader"))["version"]
+        loader = loader or _stable_first(fetch_json(f"{FABRIC}/loader"))["version"]
         installer = _stable_first(fetch_json(f"{FABRIC}/installer"))["version"]
         return download(f"{FABRIC}/loader/{version}/{loader}/{installer}/server/jar", target)
     if core == "forge":
-        promos = fetch_json(FORGE_PROMOTIONS)["promos"]
-        build = promos.get(f"{version}-recommended") or promos.get(f"{version}-latest")
+        build = loader
+        if not build:
+            promos = fetch_json(FORGE_PROMOTIONS)["promos"]
+            build = promos.get(f"{version}-recommended") or promos.get(f"{version}-latest")
         if not build:
             raise NetError(f"Для версии {version} нет Forge")
         full = f"{version}-{build}"
         return download(f"{FORGE_MAVEN}/{full}/forge-{full}-installer.jar", target)
+    if core == "neoforge":
+        build = loader or _neoforge_latest(version)
+        return download(f"{NEOFORGE_MAVEN}/{build}/neoforge-{build}-installer.jar", target)
     raise NetError(f"Неизвестное ядро: {core}")
 
 
 def forge_launch():
-    """Как запускать Forge: у разных версий установщик оставляет разные файлы."""
+    """Как запускать Forge и NeoForge: у разных версий установщик оставляет разные файлы."""
     # Файл аргументов — первым: так запускает сервер run.bat самого Forge
     args_name = "win_args.txt" if os.name == "nt" else "unix_args.txt"
-    for path in (SERVER_DIR / "libraries/net/minecraftforge/forge").glob(f"*/{args_name}"):
-        return [f"@{path.relative_to(SERVER_DIR).as_posix()}", "nogui"]
+    for folder in ("net/minecraftforge/forge", "net/neoforged/neoforge"):
+        for path in (SERVER_DIR / "libraries" / folder).glob(f"*/{args_name}"):
+            return [f"@{path.relative_to(SERVER_DIR).as_posix()}", "nogui"]
     shims = sorted(SERVER_DIR.glob("forge-*-shim.jar"))
     if shims:
         return ["-jar", shims[0].name, "--nogui"]
     jars = [p for p in sorted(SERVER_DIR.glob("forge-*.jar")) if "installer" not in p.name]
     if jars:
         return ["-jar", jars[0].name, "nogui"]
-    raise NetError("Не удалось понять, как запускать установленный Forge")
+    raise NetError("Не удалось понять, как запускать установленное ядро")
 
 
-def _run_forge_installer(java, jar, log):
-    log("[панель] Устанавливаю Forge, это займёт пару минут…")
+def _run_forge_installer(java, jar, flag, log):
+    log("[панель] Устанавливаю ядро, это займёт пару минут…")
     installer = SERVER_DIR / "forge-installer.jar"
     shutil.copy(jar, installer)
-    process = subprocess.Popen([java, "-jar", installer.name, "--installServer"], cwd=SERVER_DIR,
+    process = subprocess.Popen([java, "-jar", installer.name, flag], cwd=SERVER_DIR,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
     tail = []
@@ -203,18 +240,18 @@ def _run_forge_installer(java, jar, log):
     if code:
         for line in tail:
             log(line)
-        raise NetError(f"Установщик Forge завершился с ошибкой (код {code})")
+        raise NetError(f"Установщик завершился с ошибкой (код {code})")
 
 
-def install(core, version, log, before_replace):
+def install(core, version, log, before_replace, loader=None):
     """Ставит ядро. Текущая установка удаляется только после успешного скачивания."""
     major = java_major_for(version)
     java = ensure_java(major, log)
-    jar = _download_core(core, version, log)
+    jar = _download_core(core, version, log, loader)
     before_replace()
     _clean_runtime()
-    if core == "forge":
-        _run_forge_installer(java, jar, log)
+    if core in ("forge", "neoforge"):
+        _run_forge_installer(java, jar, "--installServer" if core == "forge" else "--install-server", log)
         jar.unlink(missing_ok=True)
         launch = forge_launch()
     else:
@@ -223,11 +260,17 @@ def install(core, version, log, before_replace):
     return {"core": core, "version": version, "java_major": major, "launch": launch}
 
 
-def install_auth_plugins(version, log):
-    """Ставит вход по паролю и скины для Paper. Возвращает список плагинов, которые не нашлись."""
+def install_auth_plugins(core, version, log):
+    """Ставит вход по паролю для Paper и Fabric. Возвращает список файлов, которые не нашлись."""
     missing = []
-    for slug, name in AUTH_PLUGINS.items():
-        query = urllib.parse.urlencode({"loaders": json.dumps(["paper"]),
+    folder, plugins = AUTH_PLUGINS[core]
+    target = SERVER_DIR / folder
+    for slug, name in plugins.items():
+        # Свой файл обновляем всегда: версия могла смениться. Чужой из сборки не дублируем
+        other = [p for p in target.glob("*.jar") if p.name.lower().startswith(slug) and p.name != name]
+        if other:
+            continue
+        query = urllib.parse.urlencode({"loaders": json.dumps([core]),
                                         "game_versions": json.dumps([version])})
         try:
             builds = fetch_json(f"{MODRINTH.format(slug=slug)}?{query}")
@@ -236,8 +279,8 @@ def install_auth_plugins(version, log):
                 continue
             files = builds[0]["files"]
             file = next((f for f in files if f["primary"]), files[0])
-            log(f"[панель] Ставлю плагин {name}…")
-            download(file["url"], SERVER_DIR / "plugins" / name, "sha1", file["hashes"]["sha1"])
+            log(f"[панель] Ставлю {name}…")
+            download(file["url"], target / name, "sha1", file["hashes"]["sha1"])
         except NetError as error:
             log(f"[панель] {error}")
             missing.append(name)

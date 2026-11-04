@@ -210,7 +210,7 @@ class Gate:
     def _wake(self, name):
         state = self.server.state
         if state == "starting":
-            return "Сервер запускается, зайди через минуту"
+            return "Сервер запускается. Подожди и зайди снова, сборке может понадобиться несколько минут"
         if state == "stopping":
             return "Сервер выключается, зайди через минуту"
         if not self.server.cfg["wake_on_join"]:
@@ -221,4 +221,4 @@ class Gate:
             self.server.start(f"зашёл игрок {name}")
         except ServerError as error:
             return str(error)
-        return "Сервер просыпается, зайди через минуту"
+        return "Сервер просыпается. Подожди и зайди снова, сборке может понадобиться несколько минут"

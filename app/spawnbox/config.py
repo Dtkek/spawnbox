@@ -45,9 +45,28 @@ DEFAULTS = {
     "guest_port": 8766,
     "public_game_address": "",
     "public_guest_url": "",
+    # Запускать сервер может любой, у кого есть адрес страницы, даже без кода
+    "open_start": True,
     # Коды доступа друзей: [{"id", "name", "hash", "created"}]
     "guests": [],
+    # Какая сборка нужна игрокам и где её взять
+    "pack_name": "",
+    "pack_url": "",
 }
+
+
+def total_memory_gb():
+    if os.name == "nt":
+        import ctypes
+
+        class Status(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                        ("total", ctypes.c_ulonglong), ("rest", ctypes.c_ulonglong * 6)]
+        status = Status()
+        status.length = ctypes.sizeof(Status)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+        return status.total // (1 << 30)
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1 << 30)
 
 
 class Config:

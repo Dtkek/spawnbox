@@ -6,14 +6,16 @@ import os
 import re
 import secrets
 import socket
+import subprocess
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backups, files, installer
-from .net import NetError
+from . import backups, files, importer, installer
+from .config import total_memory_gb
+from .net import NO_WINDOW, NetError
 from .server import ServerError
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -29,18 +31,29 @@ class ApiError(Exception):
         self.message = message
 
 
-def total_memory_gb():
-    if os.name == "nt":
-        import ctypes
+PICK_SCRIPT = """
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object Windows.Forms.Form
+$owner.TopMost = $true
+$dialog = {dialog}
+if ($dialog.ShowDialog($owner) -eq [Windows.Forms.DialogResult]::OK) {{ Write-Output $dialog.{field} }}
+"""
+PICK_DIALOGS = {
+    "folder": ("New-Object Windows.Forms.FolderBrowserDialog", "SelectedPath"),
+    "zip": ("New-Object Windows.Forms.OpenFileDialog -Property @{Filter='Архив (*.zip)|*.zip'}", "FileName"),
+}
 
-        class Status(ctypes.Structure):
-            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
-                        ("total", ctypes.c_ulonglong), ("rest", ctypes.c_ulonglong * 6)]
-        status = Status()
-        status.length = ctypes.sizeof(Status)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-        return status.total // (1 << 30)
-    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1 << 30)
+
+def pick_path(kind):
+    """Окно выбора папки или файла Windows. Браузер не умеет сообщать настоящий путь к папке."""
+    if os.name != "nt":
+        raise ApiError(409, "Окно выбора есть только в Windows: впиши путь вручную")
+    dialog, field = PICK_DIALOGS[kind]
+    script = PICK_SCRIPT.format(dialog=dialog, field=field)
+    done = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", script], capture_output=True,
+                          creationflags=NO_WINDOW)
+    return done.stdout.decode("utf-8", "replace").strip()
 
 
 def lan_ip():
@@ -124,7 +137,7 @@ class BaseHandler(BaseHTTPRequestHandler):
             raise ApiError(404, "Не найдено")
         except ApiError as error:
             self.send_json({"error": error.message}, error.status)
-        except (ServerError, files.FileError, backups.BackupError, NetError) as error:
+        except (ServerError, files.FileError, backups.BackupError, NetError, importer.ImportError_) as error:
             self.send_json({"error": str(error)}, 409)
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -170,6 +183,7 @@ class AdminHandler(BaseHandler):
             "allow_cracked": cfg["allow_cracked"], "seq": seq, "log": lines,
             "lan_game": f"{ip}:{cfg['gate_port']}", "lan_guest": f"http://{ip}:{cfg['guest_port']}",
             "public_game_address": cfg["public_game_address"], "public_guest_url": cfg["public_guest_url"],
+            "pack_name": cfg["pack_name"],
         })
 
     def start(self):
@@ -217,7 +231,8 @@ class AdminHandler(BaseHandler):
                         "idle_minutes": cfg["idle_minutes"], "wake_on_join": cfg["wake_on_join"],
                         "allow_cracked": cfg["allow_cracked"], "backup_hours": cfg["backup_hours"],
                         "backup_keep": cfg["backup_keep"], "public_game_address": cfg["public_game_address"],
-                        "public_guest_url": cfg["public_guest_url"]})
+                        "public_guest_url": cfg["public_guest_url"], "open_start": cfg["open_start"],
+                        "pack_url": cfg["pack_url"]})
 
     def save_settings(self):
         data = self.read_json()
@@ -230,12 +245,15 @@ class AdminHandler(BaseHandler):
                 if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
                     raise ApiError(400, f"Значение {key} должно быть от {low} до {high}")
                 changes[key] = value
-        for key in ("wake_on_join", "allow_cracked"):
+        for key in ("wake_on_join", "allow_cracked", "open_start"):
             if key in data:
                 changes[key] = data[key] is True
-        for key in ("public_game_address", "public_guest_url"):
+        for key in ("public_game_address", "public_guest_url", "pack_url"):
             if key in data:
                 changes[key] = str(data[key]).strip()[:200]
+        # Ссылка показывается на странице для друзей, поэтому только обычные адреса
+        if not re.fullmatch(r"(https?://\S+)?", changes.get("pack_url", "")):
+            raise ApiError(400, "Ссылка на сборку должна начинаться с http:// или https://")
         before = self.mc.cfg["allow_cracked"]
         self.mc.cfg.update(**changes)
         if changes.get("allow_cracked", before) != before:
@@ -287,6 +305,22 @@ class AdminHandler(BaseHandler):
     def delete_addon(self, name):
         files.check_addon_name(name)
         (self._addon_folder() / name).unlink(missing_ok=True)
+        self.send_json({})
+
+    def import_pick(self):
+        kind = self.read_json().get("kind")
+        if kind not in PICK_DIALOGS:
+            raise ApiError(400, "Неверный запрос")
+        self.send_json({"path": pick_path(kind)})
+
+    def import_scan(self):
+        self.send_json(importer.scan(str(self.read_json().get("path", ""))))
+
+    def import_run(self):
+        data = self.read_json()
+        self.mc.import_pack(str(data.get("path", "")), str(data.get("core", "")), str(data.get("version", "")).strip(),
+                            str(data.get("loader") or "").strip() or None, data.get("world") or None,
+                            str(data.get("nick") or "").strip(), str(data.get("name") or "").strip()[:80])
         self.send_json({})
 
     def worlds(self):
@@ -368,6 +402,9 @@ class AdminHandler(BaseHandler):
         ("GET", r"/api/addons", addons),
         ("PUT", r"/api/addons/([^/]+)", upload_addon),
         ("DELETE", r"/api/addons/([^/]+)", delete_addon),
+        ("POST", r"/api/import/pick", import_pick),
+        ("POST", r"/api/import/scan", import_scan),
+        ("POST", r"/api/import/run", import_run),
         ("GET", r"/api/worlds", worlds),
         ("POST", r"/api/worlds", create_world),
         ("POST", r"/api/worlds/select", select_world),
@@ -388,6 +425,8 @@ class AdminHandler(BaseHandler):
 class GuestHandler(BaseHandler):
     def _guest(self):
         code = self.headers.get("X-Access-Code", "")
+        if not code and self.mc.cfg["open_start"]:
+            return {"name": "гость"}
         wanted = hash_code(code)
         found = None
         for guest in self.mc.cfg["guests"]:
@@ -409,7 +448,8 @@ class GuestHandler(BaseHandler):
                         "players": sorted(mc.players), "installed": mc.installed(), "eula": cfg["eula"],
                         "version": cfg["version"], "core": cfg["core"], "idle_left": mc.idle_left(),
                         "address": cfg["public_game_address"] or f"{lan_ip()}:{cfg['gate_port']}",
-                        "password_login": files.has_password_login(cfg["core"])})
+                        "password_login": files.has_password_login(cfg["core"]),
+                        "pack_name": cfg["pack_name"], "pack_url": cfg["pack_url"]})
 
     def start(self):
         guest = self._guest()
