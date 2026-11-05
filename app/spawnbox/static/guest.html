@@ -10,7 +10,7 @@
 body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, "Segoe UI", sans-serif; display: grid; place-items: center; padding: 16px; }
 .card { width: min(440px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px; display: grid; gap: 14px; }
 .brand { font-weight: 700; font-size: 18px; display: flex; align-items: center; gap: 10px; }
-.brand i { width: 18px; height: 18px; background: var(--accent); display: block; box-shadow: inset -5px -5px 0 #3e8a3a; }
+.brand svg { width: 24px; height: 24px; display: block; }
 .state { font-size: 24px; font-weight: 600; display: flex; align-items: center; gap: 12px; }
 .state::before { content: ""; width: 13px; height: 13px; border-radius: 50%; background: var(--dot, var(--muted)); }
 .muted { color: var(--muted); font-size: 14.5px; margin: 0; }
@@ -25,7 +25,7 @@ button:disabled { opacity: .45; cursor: default; }
 </head>
 <body>
 <div class="card">
-  <div class="brand"><i></i>Spawnbox</div>
+  <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path fill="#7fd277" d="M16 3 29 10 16 17 3 10Z"/><path fill="#5fb85a" d="M3 10 16 17V30L3 23Z"/><path fill="#3e8a3a" d="M29 10 16 17V30L29 23Z"/></svg>Spawnbox</div>
 
   <form id="login" hidden style="display:grid;gap:12px">
     <p class="muted">Введи код доступа, который тебе выдал владелец сервера.</p>

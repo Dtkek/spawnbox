@@ -7,8 +7,8 @@ from pathlib import Path
 
 
 def _default_data():
-    # exe при каждом запуске распаковывается во временную папку. Данные живут отдельно,
-    # чтобы миры не зависели от того, куда положен сам файл и какой он версии
+    # Данные живут отдельно от установленной программы, чтобы обновление
+    # и удаление программы не трогали миры
     if getattr(sys, "frozen", False):
         return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Spawnbox"
     return Path(__file__).resolve().parent.parent / "data"
@@ -52,6 +52,8 @@ DEFAULTS = {
     # Какая сборка нужна игрокам и где её взять
     "pack_name": "",
     "pack_url": "",
+    # Запрещать компьютеру засыпать, пока работает Spawnbox: спящий ПК никто не разбудит
+    "keep_awake": True,
 }
 
 

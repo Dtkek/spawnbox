@@ -1,5 +1,7 @@
-"""Проверка собранного exe на раннере Windows. EULA не принимается: настоящие ядра должны
-запуститься и остановиться на её требовании. Запуск: python smoke_windows.py путь\\к\\spawnbox.exe"""
+"""Проверка установщика и приложения на раннере Windows: установка, настоящее окно, обновление, удаление.
+EULA не принимается: настоящие ядра должны запуститься и остановиться на её требовании.
+Запуск: python smoke_windows.py путь\\к\\SpawnboxSetup.exe папка\\для\\установки"""
+import ctypes
 import gzip
 import json
 import os
@@ -12,21 +14,29 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import winreg
 import zipfile
+from ctypes import wintypes
 from pathlib import Path
 
-clean_env = dict(os.environ)
-os.environ["SPAWNBOX_DATA"] = tempfile.mkdtemp()  # импорт ниже не должен трогать данные exe
+os.environ["SPAWNBOX_DATA"] = tempfile.mkdtemp()  # импорт ниже не должен трогать данные приложения
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from spawnbox.gate import decode_string, decode_varint, encode_string, encode_varint, packet  # noqa: E402
 
+del os.environ["SPAWNBOX_DATA"]  # приложение наследует окружение и должно взять свою папку
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ADMIN = "http://127.0.0.1:8765"
 GUEST = "http://127.0.0.1:8766"
-DATA = Path(clean_env["LOCALAPPDATA"]) / "Spawnbox"
+DATA = Path(os.environ["LOCALAPPDATA"]) / "Spawnbox"
 SERVER = DATA / "server"
+LOG = DATA / "logs" / "spawnbox.log"
+SHOTS = Path(os.environ.get("SMOKE_SHOTS", tempfile.mkdtemp()))
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+START_MENU = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Spawnbox.lnk"
+WM_SYSCOMMAND, SC_CLOSE = 0x0112, 0xF060
+user32 = ctypes.windll.user32
 
 
 def call(base, method, path, body=None, headers=None):
@@ -38,6 +48,77 @@ def call(base, method, path, body=None, headers=None):
             return response.status, json.loads(response.read() or b"{}")
     except urllib.error.HTTPError as error:
         return error.code, json.loads(error.read() or b"{}")
+
+
+def wait_for(condition, message, timeout=120):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if condition():
+            check(True, message)
+            return
+        time.sleep(1)
+    check(False, message)
+
+
+def admin_alive():
+    try:
+        call(ADMIN, "GET", "/api/state?since=999999")
+        return True
+    except OSError:
+        return False
+
+
+def instances():
+    done = subprocess.run(["tasklist", "/FI", "IMAGENAME eq spawnbox.exe", "/NH"], capture_output=True,
+                          text=True, errors="replace")
+    return done.stdout.lower().count("spawnbox.exe")
+
+
+def launch(exe, arguments=""):
+    """Через оболочку Windows, как двойной щелчок: у процесса нет консоли и своего вывода."""
+    os.startfile(exe, arguments=arguments)
+
+
+def app_windows():
+    found = []
+
+    def visit(hwnd, _):
+        title = ctypes.create_unicode_buffer(64)
+        user32.GetWindowTextW(hwnd, title, 64)
+        if title.value == "Spawnbox" and user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+    callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(visit)
+    user32.EnumWindows(callback, 0)
+    return found
+
+
+def shot(name):
+    """Снимок экрана. Заодно видно, что страница нарисовалась, а не осталась пустым окном."""
+    from PIL import ImageGrab
+    hwnd = app_windows()[0]
+    rect = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(1)
+    image = ImageGrab.grab()
+    image.save(SHOTS / f"{name}.png")
+    box = (max(rect.left, 0), max(rect.top, 0), min(rect.right, image.width), min(rect.bottom, image.height))
+    colors = image.crop(box).getcolors(1 << 20)
+    check(colors is None or len(colors) > 50, f"{name}: в окне нарисована страница, цветов: {colors and len(colors)}")
+
+
+def autostart_value():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            return winreg.QueryValueEx(key, "Spawnbox")[0]
+    except FileNotFoundError:
+        return None
+
+
+def run_setup(setup, target):
+    done = subprocess.run([setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", f"/DIR={target}"], timeout=900)
+    check(done.returncode == 0, "установщик отработал")
 
 
 def wait_task(timeout=900):
@@ -87,6 +168,7 @@ def check_core(core):
 def check_launch(core):
     status, reply = call(ADMIN, "POST", "/api/start")
     check(status == 409 and "EULA" in reply["error"], f"{core}: без EULA панель не запускает сервер")
+    print(f"{core}: приложение работает, окон: {len(app_windows())}", flush=True)
 
     config = json.loads((DATA / "config.json").read_text("utf-8"))
     # Если подходящая Java уже есть в системе, панель не скачивает свою
@@ -150,30 +232,84 @@ def check_import():
     check_launch("fabric")
 
 
+def check_window(exe):
+    launch(exe)
+    wait_for(admin_alive, "приложение запустилось двойным щелчком")
+    wait_for(app_windows, "появилось своё окно")
+    time.sleep(10)  # страница загружается не сразу
+    shot("1-window")
+    log = LOG.read_text("utf-8", "replace")
+    check("Окно: WebView2" in log, "окно работает на WebView2, а не в браузере")
+    check("Значок у часов запущен" in log, "значок у часов запущен")
+    check("Traceback" not in log, "в журнале нет ошибок")
+    check(instances() == 1, "работает одна копия")
+
+    user32.PostMessageW(app_windows()[0], WM_SYSCOMMAND, SC_CLOSE, 0)
+    wait_for(lambda: not app_windows(), "крестик прячет окно", 30)
+    check(admin_alive() and instances() == 1, "после закрытия окна приложение продолжает работать")
+
+    launch(exe)
+    wait_for(app_windows, "повторный запуск показывает окно первой копии", 30)
+    wait_for(lambda: instances() == 1, "вторая копия не осталась работать", 30)
+
+    status, settings = call(ADMIN, "GET", "/api/settings")
+    check(status == 200 and settings["autostart"] is False, "автозапуск по умолчанию выключен")
+    check(settings["version"].startswith("1.0."), f"версия показана: {settings['version']}")
+    call(ADMIN, "POST", "/api/settings", {"autostart": True})
+    check((autostart_value() or "").endswith('spawnbox.exe" --tray') and str(exe) in autostart_value(),
+          f"автозапуск записан: {autostart_value()}")
+    call(ADMIN, "POST", "/api/settings", {"autostart": False})
+    check(autostart_value() is None, "автозапуск выключается")
+
+
+def check_update_and_tray(setup, exe, target):
+    run_setup(setup, target)
+    check(instances() == 0, "установщик сам закрыл работающее приложение")
+    check(json.loads((DATA / "config.json").read_text("utf-8"))["core"] == "fabric", "после обновления настройки на месте")
+
+    launch(exe, "--tray")
+    wait_for(admin_alive, "запуск для автозагрузки поднимает панель")
+    time.sleep(10)
+    check(not app_windows(), "при автозагрузке окно не показывается")
+    call(ADMIN, "POST", "/api/app/show")
+    wait_for(app_windows, "окно открывается по запросу", 30)
+    time.sleep(5)
+    shot("2-after-tray")
+
+
+def check_uninstall(exe, target):
+    call(ADMIN, "POST", "/api/settings", {"autostart": True})
+    done = subprocess.run([str(Path(target) / "unins000.exe"), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], timeout=900)
+    check(done.returncode == 0, "удаление запустилось")
+    wait_for(lambda: not Path(exe).exists(), "программа удалена", 900)
+    wait_for(lambda: instances() == 0, "приложение закрылось при удалении", 60)
+    check(not START_MENU.exists(), "ярлык в меню «Пуск» убран")
+    check(autostart_value() is None, "автозапуск убран")
+    check((DATA / "config.json").exists() and SERVER.is_dir(), "миры и настройки остались")
+
+
 def main():
-    process = subprocess.Popen([sys.argv[1], "--no-browser"], env=clean_env, stdin=subprocess.DEVNULL)
+    setup, target = sys.argv[1], sys.argv[2]
+    exe = Path(target) / "spawnbox.exe"
+    run_setup(setup, target)
+    check(exe.exists(), "программа установлена")
+    check(START_MENU.exists(), "есть ярлык в меню «Пуск»")
+    check(not list(DATA.glob("config.json")), "до первого запуска данных нет")
     try:
-        deadline = time.time() + 60
-        while True:
-            try:
-                call(ADMIN, "GET", "/api/state")
-                break
-            except OSError:
-                check(process.poll() is None, "exe работает")
-                if time.time() > deadline:
-                    raise SystemExit("Панель не поднялась за 60 секунд") from None
-                time.sleep(1)
-        check(True, "панель ответила")
+        check_window(exe)
         with urllib.request.urlopen(ADMIN + "/") as page:
-            check(b"Spawnbox" in page.read(), "страница админки отдаётся из exe")
+            check(b"Spawnbox" in page.read(), "страница админки отдаётся из приложения")
         with urllib.request.urlopen(GUEST + "/") as page:
-            check(b"Spawnbox" in page.read(), "страница для друзей отдаётся из exe")
+            check(b"Spawnbox" in page.read(), "страница для друзей отдаётся из приложения")
         check(DATA.exists(), "данные лежат в %LOCALAPPDATA%\\Spawnbox")
+        status, _ = call(ADMIN, "POST", "/api/app/open-data")
+        check(status == 200, "папка с данными открывается")
 
         state = check_core("paper")
         check(state["warning"] is None, "paper: вход по паролю установлен")
         check((SERVER / "plugins" / "AuthMe.jar").exists(), "paper: AuthMe на месте")
         check((SERVER / "plugins" / "SkinsRestorer.jar").exists(), "paper: SkinsRestorer на месте")
+        shot("3-installed")
 
         reply = check_gate()
         check("спит" in reply["description"]["text"], "шлюз отвечает за спящий сервер")
@@ -200,8 +336,21 @@ def main():
         check_core("vanilla")
         check_core("fabric")
         check_import()
+
+        check_update_and_tray(setup, exe, target)
+        check_uninstall(exe, target)
+    except BaseException:
+        try:
+            shot("failed")
+        except Exception as error:
+            print(f"снимок не получился: {error}", flush=True)
+        raise
     finally:
-        process.terminate()
+        if LOG.exists():
+            print("--- журнал приложения ---", flush=True)
+            print(LOG.read_text("utf-8", "replace")[-6000:], flush=True)
+        if exe.exists():
+            subprocess.run([str(exe), "--quit"], timeout=120)
 
 
 if __name__ == "__main__":

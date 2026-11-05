@@ -13,8 +13,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backups, files, importer, installer
-from .config import total_memory_gb
+from . import backups, desktop, files, importer, installer
+from .config import DATA, total_memory_gb
 from .net import NO_WINDOW, NetError
 from .server import ServerError
 
@@ -232,7 +232,9 @@ class AdminHandler(BaseHandler):
                         "allow_cracked": cfg["allow_cracked"], "backup_hours": cfg["backup_hours"],
                         "backup_keep": cfg["backup_keep"], "public_game_address": cfg["public_game_address"],
                         "public_guest_url": cfg["public_guest_url"], "open_start": cfg["open_start"],
-                        "pack_url": cfg["pack_url"]})
+                        "pack_url": cfg["pack_url"], "keep_awake": cfg["keep_awake"],
+                        "autostart": desktop.autostart_enabled(), "version": desktop.version(),
+                        "data_dir": str(DATA)})
 
     def save_settings(self):
         data = self.read_json()
@@ -245,7 +247,7 @@ class AdminHandler(BaseHandler):
                 if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
                     raise ApiError(400, f"Значение {key} должно быть от {low} до {high}")
                 changes[key] = value
-        for key in ("wake_on_join", "allow_cracked", "open_start"):
+        for key in ("wake_on_join", "allow_cracked", "open_start", "keep_awake"):
             if key in data:
                 changes[key] = data[key] is True
         for key in ("public_game_address", "public_guest_url", "pack_url"):
@@ -254,10 +256,30 @@ class AdminHandler(BaseHandler):
         # Ссылка показывается на странице для друзей, поэтому только обычные адреса
         if not re.fullmatch(r"(https?://\S+)?", changes.get("pack_url", "")):
             raise ApiError(400, "Ссылка на сборку должна начинаться с http:// или https://")
+        if "autostart" in data:
+            if desktop.autostart_enabled() is None:
+                raise ApiError(409, "Автозапуск есть только у установленного приложения")
+            desktop.set_autostart(data["autostart"] is True)
         before = self.mc.cfg["allow_cracked"]
         self.mc.cfg.update(**changes)
         if changes.get("allow_cracked", before) != before:
             self.mc.run_task("Настройка входа для игроков", self.mc.refresh_auth_plugins)
+        self.send_json({})
+
+    def app_show(self):
+        if self.server.show:
+            self.server.show()
+        self.send_json({})
+
+    def app_quit(self):
+        self.send_json({})
+        if self.server.quit:
+            self.server.quit()
+
+    def app_open_data(self):
+        if os.name != "nt":
+            raise ApiError(409, "Открыть папку можно только в Windows")
+        desktop.open_data_folder()
         self.send_json({})
 
     def properties(self):
@@ -397,6 +419,9 @@ class AdminHandler(BaseHandler):
         ("POST", r"/api/install", install),
         ("GET", r"/api/settings", settings),
         ("POST", r"/api/settings", save_settings),
+        ("POST", r"/api/app/show", app_show),
+        ("POST", r"/api/app/quit", app_quit),
+        ("POST", r"/api/app/open-data", app_open_data),
         ("GET", r"/api/properties", properties),
         ("POST", r"/api/properties", save_properties),
         ("GET", r"/api/addons", addons),
@@ -463,17 +488,25 @@ class GuestHandler(BaseHandler):
     ]
 
 
-def _serve(handler, host, port, mc):
-    httpd = ThreadingHTTPServer((host, port), handler)
-    httpd.daemon_threads = True
+class Httpd(ThreadingHTTPServer):
+    # В Windows этот флаг разрешает двум программам занять один порт, и вторая копия
+    # не заметила бы первую
+    allow_reuse_address = os.name != "nt"
+    daemon_threads = True
+
+
+def _serve(handler, host, port, mc, show=None, quit=None):
+    httpd = Httpd((host, port), handler)
     httpd.mc = mc
     httpd.versions_cache = {}
+    httpd.show = show
+    httpd.quit = quit
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
 
 
-def serve_admin(mc):
-    return _serve(AdminHandler, "127.0.0.1", mc.cfg["admin_port"], mc)
+def serve_admin(mc, show=None, quit=None):
+    return _serve(AdminHandler, "127.0.0.1", mc.cfg["admin_port"], mc, show, quit)
 
 
 def serve_guest(mc, host="0.0.0.0"):

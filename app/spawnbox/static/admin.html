@@ -15,7 +15,7 @@
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .brand { font-weight: 700; font-size: 18px; display: flex; align-items: center; gap: 10px; }
-.brand i { width: 18px; height: 18px; background: var(--accent); display: block; box-shadow: inset -5px -5px 0 #3e8a3a; }
+.brand svg { width: 24px; height: 24px; display: block; }
 .pill { display: inline-flex; align-items: center; gap: 8px; padding: 3px 12px; border-radius: 99px; background: var(--panel-2); font-size: 14px; }
 .pill::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--dot, var(--muted)); }
 .actions { margin-left: auto; display: flex; gap: 8px; }
@@ -44,7 +44,10 @@ label.row { display: grid; grid-template-columns: minmax(150px, 240px) minmax(0,
 label.row input:not([type=checkbox]), label.row select { width: 100%; max-width: 300px; }
 .line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .line input[type=text] { flex: 1 1 180px; }
-.addr { font-family: var(--mono); background: var(--bg); padding: 2px 8px; border-radius: 5px; border: 1px solid var(--line); overflow-wrap: anywhere; }
+.addr { font-family: var(--mono); background: var(--bg); padding: 2px 8px; border-radius: 5px; border: 1px solid var(--line); overflow-wrap: anywhere; cursor: copy; }
+.addr:hover { border-color: var(--muted); }
+.welcome { border-color: var(--accent); }
+.welcome h2 { font-size: 18px; }
 #console { background: #0e0f11; border: 1px solid var(--line); border-radius: 8px; font: 13px/1.45 var(--mono); height: 380px; overflow-y: auto; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 8px; }
 #console .own { color: var(--sleep); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -57,7 +60,9 @@ label.row input:not([type=checkbox]), label.row select { width: 100%; max-width:
 .tag { color: var(--accent); font-size: 13px; }
 .drop { border: 1.5px dashed var(--line); border-radius: 8px; padding: 20px; text-align: center; color: var(--muted); }
 .drop.over { border-color: var(--accent); color: var(--text); }
-.code { font: 600 16px var(--mono); color: var(--accent); overflow-wrap: anywhere; }
+.code { font: 600 16px var(--mono); color: var(--accent); overflow-wrap: anywhere; cursor: copy; }
+.steps { margin: 6px 0 0; padding-left: 20px; }
+.steps li { margin-bottom: 6px; }
 #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); max-width: min(560px, calc(100vw - 32px)); background: var(--panel-2); border: 1px solid var(--danger); border-radius: 8px; padding: 10px 16px; display: none; }
 [hidden] { display: none !important; }
 @media (max-width: 560px) {
@@ -70,7 +75,7 @@ label.row input:not([type=checkbox]), label.row select { width: 100%; max-width:
 </head>
 <body>
 <header>
-  <div class="brand"><i></i>Spawnbox</div>
+  <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path fill="#7fd277" d="M16 3 29 10 16 17 3 10Z"/><path fill="#5fb85a" d="M3 10 16 17V30L3 23Z"/><path fill="#3e8a3a" d="M29 10 16 17V30L29 23Z"/></svg>Spawnbox</div>
   <span class="pill" id="pill">…</span>
   <span id="about" class="hint" style="margin:0"></span>
   <div class="actions">
@@ -91,10 +96,18 @@ label.row input:not([type=checkbox]), label.row select { width: 100%; max-width:
 
   <section data-tab="Сервер">
     <div style="display:grid;gap:16px">
+      <div class="card welcome" id="welcome" hidden>
+        <h2>С чего начнём?</h2>
+        <p class="hint" style="margin:0 0 12px">Spawnbox сам скачает всё нужное, включая Java. Твои файлы он не меняет, а только копирует.</p>
+        <div class="line">
+          <button class="primary" id="welcome-pack">У меня есть своя сборка или мир</button>
+          <button id="welcome-new">Создать новый сервер</button>
+        </div>
+      </div>
       <div class="card">
         <h2>Как подключиться</h2>
-        <div class="line">В своей сети: <span class="addr" id="lan-game"></span></div>
-        <div class="line" style="margin-top:6px" id="public-line" hidden>Из интернета: <span class="addr" id="public-game"></span></div>
+        <div class="line">В своей сети: <span class="addr" id="lan-game" title="Нажми, чтобы скопировать"></span></div>
+        <div class="line" style="margin-top:6px" id="public-line" hidden>Из интернета: <span class="addr" id="public-game" title="Нажми, чтобы скопировать"></span></div>
         <p class="hint" id="connect-hint"></p>
       </div>
       <div class="card">
@@ -170,6 +183,14 @@ label.row input:not([type=checkbox]), label.row select { width: 100%; max-width:
   <section data-tab="Настройки" hidden>
     <div style="display:grid;gap:16px">
       <div class="card">
+        <h2>Приложение</h2>
+        <label class="row" id="autostart-row">Запускать вместе с Windows <input type="checkbox" id="autostart"></label>
+        <label class="row">Не давать компьютеру засыпать <input type="checkbox" id="keep_awake"></label>
+        <p class="hint">Друзья могут запустить сервер, только пока компьютер включён и Spawnbox работает. Поэтому, пока он открыт, компьютер сам не засыпает. Если это мешает, сними галочку. Закрытие окна не выключает Spawnbox: он остаётся у часов, а выйти можно через меню значка.</p>
+        <div class="line" style="margin-top:8px"><button id="open-data">Открыть папку с мирами и бэкапами</button></div>
+        <p class="hint" id="app-about"></p>
+      </div>
+      <div class="card">
         <h2>Игроки</h2>
         <label class="row">Пускать без лицензии <input type="checkbox" id="allow_cracked"></label>
         <p class="hint">Если включено, зайти смогут все: и с лицензией, и без. Ник при этом никто не проверяет, поэтому на Paper и Fabric панель ставит вход по паролю: <b>/register пароль пароль</b>, потом <b>/login пароль</b>. Выбери режим до начала игры: при его смене у игроков пропадут вещи и прогресс, потому что изменится их идентификатор.</p>
@@ -231,7 +252,7 @@ label.row input:not([type=checkbox]), label.row select { width: 100%; max-width:
       <div class="card">
         <h2>Кто может запускать сервер</h2>
         <label class="row">Любой, у кого есть ссылка <input type="checkbox" id="open_start"></label>
-        <p class="hint">Страница для друзей: <span class="addr" id="guest-link"></span>. Если выключить, понадобится личный код. На странице можно только смотреть статус и запускать сервер, плагины и консоль там недоступны. Сервер запустится, только пока этот компьютер включён и Spawnbox открыт.</p>
+        <p class="hint">Страница для друзей: <span class="addr" id="guest-link" title="Нажми, чтобы скопировать"></span>. Если выключить, понадобится личный код. На странице можно только смотреть статус и запускать сервер, плагины и консоль там недоступны. Сервер запустится, только пока этот компьютер включён и Spawnbox работает. Закрытое окно ему не мешает: приложение остаётся у часов.</p>
         <label class="row">Где скачать сборку <input type="url" id="pack_url" placeholder="https://… (необязательно)" autocomplete="off"></label>
         <p class="hint">Игрокам нужна такая же сборка, как на сервере. Ссылка появится на странице для друзей.</p>
         <div class="line" style="margin-top:8px"><button class="primary" id="save-access">Сохранить</button></div>
@@ -251,6 +272,16 @@ label.row input:not([type=checkbox]), label.row select { width: 100%; max-width:
       <div class="card">
         <h2>У кого есть доступ</h2>
         <div class="list" id="guests"></div>
+      </div>
+      <div class="card">
+        <h2>Как пустить друзей из интернета</h2>
+        <p class="hint" style="margin:0">Пока сервер виден только в твоей домашней сети. Подойдёт любой из вариантов:</p>
+        <ul class="steps">
+          <li><b>Общая VPN-сеть</b>, например Radmin VPN или ZeroTier. Все ставят одну программу и играют как дома. Наружу ничего не открывается, поэтому это самый безопасный вариант.</li>
+          <li><b>Туннель</b>, например <a href="https://playit.gg" target="_blank" rel="noopener">playit.gg</a>. Не нужен белый IP. Создай туннели на порты 25565 и 8766.</li>
+          <li><b>Проброс портов на роутере.</b> Перенаправь порты 25565 и 8766 на этот компьютер. Работает, если у провайдера белый IP.</li>
+        </ul>
+        <p class="hint">Полученные адреса впиши на вкладке «Настройки», и они появятся здесь и в ссылках для друзей. <b>Порт 8765 открывать нельзя:</b> через него можно управлять твоим компьютером.</p>
       </div>
     </div>
   </section>
@@ -369,6 +400,7 @@ function render(s) {
   $("btn-stop").hidden = $("btn-restart").hidden = off;
   $("btn-stop").disabled = $("btn-restart").disabled = busy || s.state === "stopping";
 
+  $("welcome").hidden = s.installed || busy;
   $("eula-banner").hidden = s.eula;
   const banner = (id, text) => { $(id).hidden = !text; if (text) $(id).firstElementChild.textContent = text; };
   banner("warning", s.warning);
@@ -379,7 +411,7 @@ function render(s) {
   $("public-line").hidden = !s.public_game_address;
   $("public-game").textContent = s.public_game_address;
   $("connect-hint").textContent = s.public_game_address ? "" :
-    "Друзьям вне твоей сети нужен внешний адрес: как его получить, написано в README. Потом впиши его в настройках.";
+    "Друзьям вне твоей сети нужен внешний адрес: как его получить, написано на вкладке «Доступ для друзей».";
 
   $("count").textContent = s.players.length ? `(${s.players.length})` : "";
   $("players").replaceChildren(...s.players.map(name => {
@@ -428,6 +460,14 @@ $("btn-start").addEventListener("click", act(() => api("POST", "/api/start")));
 $("btn-stop").addEventListener("click", act(() => api("POST", "/api/stop")));
 $("btn-restart").addEventListener("click", act(() => api("POST", "/api/restart")));
 $("eula-accept").addEventListener("click", act(() => api("POST", "/api/eula", { accept: true })));
+$("welcome-pack").addEventListener("click", () => openTab("Импорт сборки"));
+$("welcome-new").addEventListener("click", () => openTab("Версия"));
+document.addEventListener("click", act(async event => {
+  const target = event.target.closest && event.target.closest(".addr, .code");
+  if (!target || !target.textContent) return;
+  await navigator.clipboard.writeText(target.textContent);
+  toast("Скопировано");
+}));
 $("command-form").addEventListener("submit", act(async () => {
   const command = $("command").value;
   $("command").value = "";
@@ -455,6 +495,7 @@ $("install").addEventListener("click", act(async () => {
   const version = $("version").value;
   if (!version) throw new Error("Выбери версию");
   await api("POST", "/api/install", { core: $("core").value, version });
+  openTab("Сервер");
 }));
 
 // --- Импорт сборки
@@ -511,7 +552,17 @@ async function loadSettings() {
   $("memory_gb").max = s.memory_max;
   NUMBERS.concat(TEXTS).forEach(k => $(k).value = s[k]);
   CHECKS.forEach(k => $(k).checked = s[k]);
+  $("keep_awake").checked = s.keep_awake;
+  $("autostart-row").hidden = s.autostart === null;
+  $("autostart").checked = s.autostart === true;
+  $("app-about").textContent = `Версия ${s.version}. Данные: ${s.data_dir}`;
 }
+for (const key of ["autostart", "keep_awake"]) {
+  $(key).addEventListener("change", act(async event => {
+    await api("POST", "/api/settings", { [key]: event.target.checked });
+  }));
+}
+$("open-data").addEventListener("click", act(() => api("POST", "/api/app/open-data")));
 $("save-settings").addEventListener("click", act(async () => {
   const data = {};
   NUMBERS.forEach(k => data[k] = Number($(k).value));

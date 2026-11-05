@@ -9,16 +9,18 @@ import socket
 import struct
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 TEMP = tempfile.mkdtemp(prefix="spawnbox-test-")
 os.environ["SPAWNBOX_DATA"] = TEMP
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from spawnbox import backups, files, gate, importer, installer  # noqa: E402
+from spawnbox import backups, desktop, files, gate, importer, installer  # noqa: E402
 from spawnbox.config import BACKUP_DIR, SERVER_DIR, Config  # noqa: E402
 from spawnbox.gate import Gate, encode_string, encode_varint, packet  # noqa: E402
 from spawnbox.server import Server, ServerError  # noqa: E402
@@ -452,6 +454,79 @@ class AdminApiTests(Base):
         status, body = self.request(self.cfg["admin_port"], "GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("Spawnbox".encode(), body)
+
+
+class DesktopTests(Base):
+    def test_second_copy_cannot_take_port(self):
+        with self.assertRaises(OSError):
+            serve_admin(self.mc)
+
+    def test_show_and_quit_routes(self):
+        calls = []
+        self.admin.show = lambda: calls.append("show")
+        self.admin.quit = lambda: calls.append("quit")
+        self.addCleanup(setattr, self.admin, "show", None)
+        self.addCleanup(setattr, self.admin, "quit", None)
+        self.assertTrue(desktop.call_running(self.cfg["admin_port"], "show"))
+        self.assertTrue(desktop.call_running(self.cfg["admin_port"], "quit"))
+        self.assertEqual(calls, ["show", "quit"])
+
+    def test_app_routes_need_header(self):
+        calls = []
+        self.admin.quit = lambda: calls.append("quit")
+        self.addCleanup(setattr, self.admin, "quit", None)
+        status, _ = self.request(self.cfg["admin_port"], "POST", "/api/app/quit")
+        self.assertEqual(status, 403)
+        self.assertEqual(calls, [])
+
+    def test_friends_page_cannot_control_app(self):
+        for action in ("show", "quit", "open-data"):
+            status, _ = self.request(self.cfg["guest_port"], "POST", f"/api/app/{action}", headers={"X-Spawnbox": "1"})
+            self.assertEqual(status, 404, action)
+
+    def test_no_running_copy(self):
+        self.assertFalse(desktop.call_running(free_port(), "show"))
+
+    def test_foreign_program_on_port_is_not_spawnbox(self):
+        # Страница друзей отвечает 404 на этот адрес, как и любая чужая программа
+        self.assertFalse(desktop.call_running(self.cfg["guest_port"], "show"))
+
+    def test_autostart_setting(self):
+        calls = []
+        with mock.patch.object(desktop, "autostart_enabled", return_value=False), \
+                mock.patch.object(desktop, "set_autostart", calls.append):
+            status, data = self.admin_api("GET", "/api/settings")
+            self.assertEqual(data["autostart"], False)
+            status, _ = self.admin_api("POST", "/api/settings", {"autostart": True})
+            self.assertEqual(status, 200)
+        self.assertEqual(calls, [True])
+
+    def test_autostart_unavailable_from_source(self):
+        with mock.patch.object(desktop, "autostart_enabled", return_value=None):
+            status, _ = self.admin_api("POST", "/api/settings", {"autostart": True})
+        self.assertEqual(status, 409)
+
+    def test_keep_awake_setting(self):
+        self.addCleanup(self.cfg.update, keep_awake=True)
+        status, _ = self.admin_api("POST", "/api/settings", {"keep_awake": False})
+        self.assertEqual(status, 200)
+        self.assertFalse(self.cfg["keep_awake"])
+        _, data = self.admin_api("GET", "/api/settings")
+        self.assertFalse(data["keep_awake"])
+        self.assertTrue(data["version"])
+
+    def test_tray_status_text(self):
+        app = desktop.Desktop(self.mc, "http://127.0.0.1", threading.Event())
+        self.assertEqual(app.status_text(), "Сервер спит")
+        self.cfg.update(wake_on_join=False)
+        self.assertEqual(app.status_text(), "Сервер выключен")
+        self.start_ready()
+        self.mc.players.add("Steve")
+        self.assertEqual(app.status_text(), "Сервер работает, игроков: 1")
+        self.cfg.update(launch=None)
+        self.mc.stop(wait=True, force=True)
+        wait_for(lambda: self.mc.state == "stopped")
+        self.assertEqual(app.status_text(), "Сервер не установлен")
 
 
 class GuestApiTests(Base):
