@@ -1,6 +1,7 @@
 """Импорт сборки и мира с этого компьютера. Исходная папка только читается, всё копируется."""
 import gzip
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -24,6 +25,7 @@ CLIENT_ONLY_FOLDER = "mods_client_only"
 CLIENT_ONLY_NAMES = ("optifine", "optifabric", "sodium", "iris", "oculus", "embeddium", "entityculling",
                      "fancymenu", "mouse-tweaks", "mousetweaks", "betterf3", "continuity", "lambdynamiclights")
 SERVER_SAFE_SUFFIXES = ("-server", "_server")
+FORGE_TOMLS = ("META-INF/neoforge.mods.toml", "META-INF/mods.toml")
 
 TRANSLIT = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
                     "a b v g d e e zh z i y k l m n o p r s t u f kh ts ch sh sch - y - e yu ya".split()))
@@ -422,12 +424,85 @@ def _modrinth_client_only(paths, log):
     return found
 
 
+def _provided_ids(jar):
+    """Какие моды даёт этот jar: сам он, его псевдонимы и всё, что вложено внутрь."""
+    ids = set()
+    names = jar.namelist()
+    if "fabric.mod.json" in names:
+        data = json.loads(jar.read("fabric.mod.json").decode("utf-8", "replace"), strict=False)
+        ids.add(data.get("id"))
+        ids.update(data.get("provides") or [])
+    for toml in FORGE_TOMLS:
+        if toml in names:
+            own = jar.read(toml).decode("utf-8", "replace").split("[[dependencies", 1)[0]
+            ids.update(re.findall(r'^\s*modId\s*=\s*"([^"]+)"', own, re.M))
+    for name in names:
+        if name.startswith("META-INF/") and name.endswith(".jar"):
+            with zipfile.ZipFile(io.BytesIO(jar.read(name))) as nested:
+                ids |= _provided_ids(nested)
+    return ids
+
+
+def _required_ids(jar):
+    """Без каких модов загрузчик откажется запускать этот мод на сервере."""
+    names = jar.namelist()
+    if "fabric.mod.json" in names:
+        data = json.loads(jar.read("fabric.mod.json").decode("utf-8", "replace"), strict=False)
+        return set(data.get("depends") or {})
+    required = set()
+    for toml in FORGE_TOMLS:
+        if toml in names:
+            for part in jar.read(toml).decode("utf-8", "replace").split("[[dependencies")[1:]:
+                needed = re.search(r'mandatory\s*=\s*true|type\s*=\s*"required"', part)
+                on_client = re.search(r'side\s*=\s*"CLIENT"', part)
+                mod_id = re.search(r'modId\s*=\s*"([^"]+)"', part)
+                if needed and mod_id and not on_client:
+                    required.add(mod_id[1])
+    return required
+
+
+def _mod_links(path):
+    try:
+        with zipfile.ZipFile(path) as jar:
+            return _provided_ids(jar), _required_ids(jar)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+        return set(), set()
+
+
+def _settle_dependencies(mods, client_only, log):
+    """Отложенный мод бывает нужен другому, и тогда сервер падает при запуске. Если мод только похож
+    на клиентский (так считает Modrinth или имя файла), он возвращается. Если он сам объявлен
+    клиентским, на сервере он не загрузится никогда, поэтому откладывается и тот, кому он нужен."""
+    links = {path: _mod_links(path) for path in mods}
+    never_on_server = {path for path in client_only if _sniff_mod(path)["client_only"]}
+    while True:
+        kept = [path for path in mods if path not in client_only]
+        provided = set().union(*(links[path][0] for path in kept))
+        found = next(((mod, dep) for mod in kept for dep in sorted(links[mod][1] - provided)
+                      if any(dep in links[path][0] for path in client_only)), None)
+        if not found:
+            return
+        mod, dep = found
+        providers = sorted(path for path in client_only if dep in links[path][0])
+        wrongly_aside = next((path for path in providers if path not in never_on_server), None)
+        if wrongly_aside:
+            client_only.discard(wrongly_aside)
+            log(f"[панель] Оставил на сервере {wrongly_aside.name}: без него не запустится {mod.name}")
+        else:
+            client_only.add(mod)
+            never_on_server.add(mod)
+            log(f"[панель] Убрал с сервера {mod.name}: ему нужен {dep}, а тот работает только у игроков. "
+                "Если этот мод добавляет блоки или предметы, в копии мира на сервере они пропадут. "
+                "Исходный мир не меняется")
+
+
 def _set_aside_client_mods(log):
     mods = _mod_paths(SERVER_DIR)
     if not mods:
         return []
     client_only = {p for p in mods if _sniff_mod(p)["client_only"] or _is_client_name(p)}
     client_only |= _modrinth_client_only(mods, log)
+    _settle_dependencies(mods, client_only, log)
     if client_only:
         folder = SERVER_DIR / CLIENT_ONLY_FOLDER
         shutil.rmtree(folder, ignore_errors=True)

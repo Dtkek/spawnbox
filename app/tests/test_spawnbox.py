@@ -2,6 +2,7 @@
 import gzip
 import hashlib
 import http.client
+import io
 import json
 import os
 import shutil
@@ -931,6 +932,108 @@ class ImporterTests(Base):
         self.assertEqual(saved[:3], b"\x0a\x00\x00", "у файла игрока корень без имени")
         self.assertIn(b"Dimension", saved)
         self.assertNotIn(b"Version", saved, "в файл игрока попадает только сам игрок")
+
+    def fabric_mod(self, name, mod_id, environment="*", depends=(), provides=(), nested=()):
+        """Мод как в сборке. Вложенные jar: [(id, файл)], внутри лежат настоящие мини-моды."""
+        (self.source / "mods").mkdir(exist_ok=True)
+        with zipfile.ZipFile(self.source / "mods" / name, "w") as jar:
+            jar.writestr("fabric.mod.json", json.dumps({
+                "schemaVersion": 1, "id": mod_id, "version": name, "environment": environment,
+                "depends": {dep: "*" for dep in depends}, "provides": list(provides)}))
+            for inner in nested:
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, "w") as inner_jar:
+                    inner_jar.writestr("fabric.mod.json", json.dumps({"schemaVersion": 1, "id": inner, "version": "1"}))
+                jar.writestr(f"META-INF/jars/{inner}.jar", buffer.getvalue())
+
+    def flag_on_modrinth(self, *names):
+        digests = {hashlib.sha512((self.source / "mods" / name).read_bytes()).hexdigest(): name for name in names}
+        importer.post_json = lambda url, body: {
+            digest: {"project_id": name} for digest, name in digests.items() if digest in body["hashes"]}
+        real_fetch = importer.fetch_json
+        self.addCleanup(setattr, importer, "fetch_json", real_fetch)
+        importer.fetch_json = lambda url: [{"id": name, "server_side": "unsupported"} for name in names]
+
+    def apply_mods(self):
+        lines = []
+        importer.apply(str(self.source), None, "", True, lines.append)
+        aside = SERVER_DIR / "mods_client_only"
+        return (sorted(p.name for p in (SERVER_DIR / "mods").glob("*.jar")),
+                sorted(p.name for p in aside.glob("*.jar")) if aside.exists() else [], "\n".join(lines))
+
+    def test_dependencies_of_real_pack_error(self):
+        """Ошибка из настоящей сборки: Forge Config Screens просит modmenu, Prominent просит luna."""
+        self.fabric_mod("modmenu.jar", "modmenu", "client")
+        self.fabric_mod("forgeconfigscreens.jar", "forgeconfigscreens", depends=["modmenu", "fabricloader", "minecraft"])
+        self.fabric_mod("luna.jar", "luna")
+        self.fabric_mod("prominent.jar", "prominent", depends=["luna", "fabric-api"])
+        self.fabric_mod("fabric-api.jar", "fabric-api")
+        self.flag_on_modrinth("luna.jar", "modmenu.jar")
+        kept, aside, log = self.apply_mods()
+        self.assertEqual(kept, ["fabric-api.jar", "luna.jar", "prominent.jar"])
+        self.assertEqual(aside, ["forgeconfigscreens.jar", "modmenu.jar"])
+        self.assertIn("Оставил на сервере luna.jar", log)
+        self.assertIn("Убрал с сервера forgeconfigscreens.jar", log)
+
+    def test_client_mod_stays_aside_when_kept_mod_provides_same_id(self):
+        self.fabric_mod("modmenu.jar", "modmenu", "client", nested=["fabric-screen-api-v1"])
+        self.fabric_mod("fabric-api.jar", "fabric-api", nested=["fabric-screen-api-v1"])
+        self.fabric_mod("content.jar", "content", depends=["fabric-screen-api-v1"])
+        kept, aside, _ = self.apply_mods()
+        self.assertEqual(kept, ["content.jar", "fabric-api.jar"])
+        self.assertEqual(aside, ["modmenu.jar"])
+
+    def test_dependency_inside_client_mod(self):
+        self.fabric_mod("client.jar", "client", "client", nested=["library"], provides=["alias"])
+        self.fabric_mod("a.jar", "a", depends=["library"])
+        self.fabric_mod("b.jar", "b", depends=["alias"])
+        kept, aside, _ = self.apply_mods()
+        self.assertEqual(kept, [])
+        self.assertEqual(aside, ["a.jar", "b.jar", "client.jar"])
+
+    def test_dependency_chain_does_not_loop(self):
+        """Мод вернули на сервер, а ему самому нужен клиентский: убираются оба, и цикл заканчивается."""
+        self.fabric_mod("client.jar", "client", "client")
+        self.fabric_mod("middle.jar", "middle", depends=["client"])
+        self.fabric_mod("top.jar", "top", depends=["middle"])
+        self.fabric_mod("other.jar", "other")
+        self.flag_on_modrinth("middle.jar")
+        kept, aside, _ = self.apply_mods()
+        self.assertEqual(kept, ["other.jar"])
+        self.assertEqual(aside, ["client.jar", "middle.jar", "top.jar"])
+
+    def test_unrelated_modrinth_client_mod_stays_aside(self):
+        self.fabric_mod("hud.jar", "hud")
+        self.fabric_mod("content.jar", "content")
+        self.flag_on_modrinth("hud.jar")
+        kept, aside, _ = self.apply_mods()
+        self.assertEqual(kept, ["content.jar"])
+        self.assertEqual(aside, ["hud.jar"])
+
+    def test_forge_dependencies(self):
+        (self.source / "mods").mkdir()
+        with zipfile.ZipFile(self.source / "mods" / "lib.jar", "w") as jar:
+            jar.writestr("META-INF/mods.toml", 'modLoader="javafml"\n[[mods]]\nmodId="lib"\n')
+        with zipfile.ZipFile(self.source / "mods" / "needs.jar", "w") as jar:
+            jar.writestr("META-INF/mods.toml", 'modLoader="javafml"\n[[mods]]\nmodId="needs"\n'
+                         '[[dependencies.needs]]\nmodId="lib"\nmandatory=true\nside="BOTH"\n')
+        with zipfile.ZipFile(self.source / "mods" / "hud.jar", "w") as jar:
+            jar.writestr("META-INF/mods.toml", 'modLoader="javafml"\n[[mods]]\nmodId="hud"\n')
+        with zipfile.ZipFile(self.source / "mods" / "visual.jar", "w") as jar:
+            jar.writestr("META-INF/mods.toml", 'modLoader="javafml"\n[[mods]]\nmodId="visual"\n'
+                         '[[dependencies.visual]]\nmodId="hud"\nmandatory=true\nside="CLIENT"\n')
+        self.flag_on_modrinth("lib.jar", "hud.jar")
+        kept, aside, _ = self.apply_mods()
+        self.assertEqual(kept, ["lib.jar", "needs.jar", "visual.jar"])
+        self.assertEqual(aside, ["hud.jar"], "зависимость только для клиента серверу не мешает")
+
+    def test_broken_jar_does_not_stop_import(self):
+        (self.source / "mods").mkdir()
+        (self.source / "mods" / "broken.jar").write_bytes(b"not a jar")
+        self.fabric_mod("ok.jar", "ok")
+        kept, aside, _ = self.apply_mods()
+        self.assertEqual(kept, ["broken.jar", "ok.jar"])
+        self.assertEqual(aside, [])
 
     def test_apply_keeps_existing_world_with_same_name(self):
         write_level(SERVER_DIR / "myworld", "1.0")
