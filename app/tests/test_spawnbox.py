@@ -21,7 +21,7 @@ os.environ["SPAWNBOX_DATA"] = TEMP
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from spawnbox import backups, desktop, files, gate, importer, installer  # noqa: E402
-from spawnbox.config import BACKUP_DIR, SERVER_DIR, Config  # noqa: E402
+from spawnbox.config import BACKUP_DIR, SERVER_DIR, Config, safe_data_path  # noqa: E402
 from spawnbox.gate import Gate, encode_string, encode_varint, packet  # noqa: E402
 from spawnbox.server import Server, ServerError  # noqa: E402
 from spawnbox.web import serve_admin, serve_guest  # noqa: E402
@@ -514,6 +514,24 @@ class DesktopTests(Base):
         _, data = self.admin_api("GET", "/api/settings")
         self.assertFalse(data["keep_awake"])
         self.assertTrue(data["version"])
+
+    def test_data_path_avoids_cyrillic(self):
+        shared = Path("/shared/Spawnbox")
+        self.assertEqual(safe_data_path(Path("/Users/misha/Spawnbox"), shared), Path("/Users/misha/Spawnbox"))
+        self.assertEqual(safe_data_path(Path("/Users/Миша/Spawnbox"), shared), shared)
+        self.assertEqual(safe_data_path(Path("/Users/Миша/Spawnbox"), Path("/Общая/Spawnbox")), Path("/Users/Миша/Spawnbox"))
+        # Уже установленный сервер не должен потеряться
+        existing = Path(TEMP) / "Миша"
+        existing.mkdir()
+        (existing / "config.json").write_text("{}", "utf-8")
+        self.assertEqual(safe_data_path(existing, shared), existing)
+
+    def test_java_temp_folder_is_ours(self):
+        with mock.patch.object(installer, "java_path", return_value="java"):
+            command = Server(self.cfg)._command()
+        flag = next(part for part in command if part.startswith("-Djava.io.tmpdir="))
+        self.assertTrue(Path(flag.split("=", 1)[1]).is_dir())
+        self.assertLess(command.index(flag), command.index("-jar"), "настройка Java идёт до запуска сервера")
 
     def test_tray_status_text(self):
         app = desktop.Desktop(self.mc, "http://127.0.0.1", threading.Event())

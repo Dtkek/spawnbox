@@ -24,6 +24,8 @@ LOG_FILE = DATA / "logs" / "spawnbox.log"
 LOG_LIMIT = 1 << 20
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REFRESH_SECONDS = 2
+WINDOW_WIDTH, WINDOW_HEIGHT = 1120, 780
+SM_CXSCREEN, SM_CYSCREEN = 0, 1
 MB_YESNO, MB_ICONERROR, MB_ICONQUESTION, MB_TOPMOST, IDYES = 0x4, 0x10, 0x20, 0x40000, 6
 ASFW_ANY = -1
 
@@ -80,6 +82,12 @@ def call_running(port, action):
 
 def open_data_folder():
     os.startfile(DATA)
+
+
+def window_size():
+    """Удобный размер окна, но так, чтобы оно влезало в экран ноутбука вместе с панелью задач."""
+    metrics = ctypes.windll.user32.GetSystemMetrics
+    return min(WINDOW_WIDTH, metrics(SM_CXSCREEN) - 40), min(WINDOW_HEIGHT, metrics(SM_CYSCREEN) - 80)
 
 
 # --- Автозапуск
@@ -167,7 +175,8 @@ class Desktop:
         if winforms.renderer != "edgechromium":
             raise RuntimeError("Не найден WebView2")
         webview.settings["ALLOW_DOWNLOADS"] = True  # чтобы работала кнопка «Скачать» у бэкапа
-        self.window = webview.create_window(APP_NAME, self.url, width=1120, height=780, min_size=(720, 520),
+        width, height = window_size()
+        self.window = webview.create_window(APP_NAME, self.url, width=width, height=height, min_size=(720, 520),
                                             hidden=hidden, background_color="#15171a")
         self.window.events.before_show += self._on_form_created
         print("Окно: WebView2", flush=True)

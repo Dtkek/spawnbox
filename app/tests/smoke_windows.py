@@ -29,7 +29,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ADMIN = "http://127.0.0.1:8765"
 GUEST = "http://127.0.0.1:8766"
-DATA = Path(os.environ["LOCALAPPDATA"]) / "Spawnbox"
+# В пути к LOCALAPPDATA кириллица, как у пользователя с русским именем: данные должны уйти в общую папку
+DATA = Path(os.environ["ProgramData"]) / "Spawnbox"
 SERVER = DATA / "server"
 LOG = DATA / "logs" / "spawnbox.log"
 SHOTS = Path(os.environ.get("SMOKE_SHOTS", tempfile.mkdtemp()))
@@ -255,6 +256,11 @@ def check_window(exe):
     status, settings = call(ADMIN, "GET", "/api/settings")
     check(status == 200 and settings["autostart"] is False, "автозапуск по умолчанию выключен")
     check(settings["version"].startswith("1.0."), f"версия показана: {settings['version']}")
+    check(settings["data_dir"] == str(DATA), f"данные в папке без кириллицы: {settings['data_dir']}")
+    rect = wintypes.RECT()
+    user32.GetWindowRect(app_windows()[0], ctypes.byref(rect))
+    check(rect.left >= 0 and rect.top >= 0 and rect.right <= user32.GetSystemMetrics(0)
+          and rect.bottom <= user32.GetSystemMetrics(1), f"окно влезает в экран: {rect.right - rect.left}x{rect.bottom - rect.top}")
     call(ADMIN, "POST", "/api/settings", {"autostart": True})
     check((autostart_value() or "").endswith('spawnbox.exe" --tray') and str(exe) in autostart_value(),
           f"автозапуск записан: {autostart_value()}")
@@ -301,7 +307,7 @@ def main():
             check(b"Spawnbox" in page.read(), "страница админки отдаётся из приложения")
         with urllib.request.urlopen(GUEST + "/") as page:
             check(b"Spawnbox" in page.read(), "страница для друзей отдаётся из приложения")
-        check(DATA.exists(), "данные лежат в %LOCALAPPDATA%\\Spawnbox")
+        check((DATA / "config.json").exists(), "данные лежат в общей папке")
         status, _ = call(ADMIN, "POST", "/api/app/open-data")
         check(status == 200, "папка с данными открывается")
 

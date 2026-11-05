@@ -6,11 +6,20 @@ import threading
 from pathlib import Path
 
 
+def safe_data_path(path, shared):
+    """Java не находит свои файлы, если в пути есть буквы не из кодировки Windows, а часть модов
+    не любит любую кириллицу. Поэтому при русском имени пользователя данные живут в общей папке."""
+    if str(path).isascii() or (path / "config.json").exists() or not str(shared).isascii():
+        return path
+    return shared
+
+
 def _default_data():
     # Данные живут отдельно от установленной программы, чтобы обновление
     # и удаление программы не трогали миры
     if getattr(sys, "frozen", False):
-        return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Spawnbox"
+        return safe_data_path(Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Spawnbox",
+                              Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Spawnbox")
     return Path(__file__).resolve().parent.parent / "data"
 
 

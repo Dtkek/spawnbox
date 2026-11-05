@@ -401,7 +401,7 @@ function render(s) {
   $("btn-stop").disabled = $("btn-restart").disabled = busy || s.state === "stopping";
 
   $("welcome").hidden = s.installed || busy;
-  $("eula-banner").hidden = s.eula;
+  $("eula-banner").hidden = s.eula || !s.installed;
   const banner = (id, text) => { $(id).hidden = !text; if (text) $(id).firstElementChild.textContent = text; };
   banner("warning", s.warning);
   banner("error", s.gate_error || s.error);

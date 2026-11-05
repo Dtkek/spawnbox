@@ -9,7 +9,7 @@ from collections import deque
 from contextlib import contextmanager
 
 from . import backups, files, importer, installer
-from .config import SERVER_DIR, total_memory_gb
+from .config import CACHE_DIR, SERVER_DIR, total_memory_gb
 from .installer import CORES
 
 LOG_LINES = 3000
@@ -79,7 +79,11 @@ class Server:
         if not java:
             raise ServerError(f"Не найдена Java {self.cfg['java_major']}: установи версию заново")
         memory = self.cfg["memory_gb"]
-        return [java, "-Xms1G", f"-Xmx{memory}G", "-XX:+UseG1GC",
+        # Системная временная папка лежит в профиле пользователя, а Minecraft распаковывает
+        # туда свои библиотеки: с кириллицей в пути они могут не загрузиться
+        temp = CACHE_DIR / "tmp"
+        temp.mkdir(parents=True, exist_ok=True)
+        return [java, "-Xms1G", f"-Xmx{memory}G", "-XX:+UseG1GC", f"-Djava.io.tmpdir={temp}",
                 # Иначе на русской Windows консоль сервера будет в кодировке cp866
                 "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8",
                 *self.cfg["launch"]]
