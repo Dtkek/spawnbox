@@ -515,6 +515,11 @@ class DesktopTests(Base):
         self.assertFalse(data["keep_awake"])
         self.assertTrue(data["version"])
 
+    def test_window_fits_small_screens(self):
+        self.assertEqual(desktop.fit_window(1920, 1080), (1120, 780))
+        self.assertEqual(desktop.fit_window(1366, 768), (1120, 688))
+        self.assertEqual(desktop.fit_window(1024, 768), (984, 688))
+
     def test_data_path_avoids_cyrillic(self):
         shared = Path("/shared/Spawnbox")
         self.assertEqual(safe_data_path(Path("/Users/misha/Spawnbox"), shared), Path("/Users/misha/Spawnbox"))

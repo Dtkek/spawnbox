@@ -26,6 +26,7 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REFRESH_SECONDS = 2
 WINDOW_WIDTH, WINDOW_HEIGHT = 1120, 780
 SM_CXSCREEN, SM_CYSCREEN = 0, 1
+TASKBAR_HEIGHT = 60
 MB_YESNO, MB_ICONERROR, MB_ICONQUESTION, MB_TOPMOST, IDYES = 0x4, 0x10, 0x20, 0x40000, 6
 ASFW_ANY = -1
 
@@ -84,10 +85,19 @@ def open_data_folder():
     os.startfile(DATA)
 
 
-def window_size():
-    """Удобный размер окна, но так, чтобы оно влезало в экран ноутбука вместе с панелью задач."""
-    metrics = ctypes.windll.user32.GetSystemMetrics
-    return min(WINDOW_WIDTH, metrics(SM_CXSCREEN) - 40), min(WINDOW_HEIGHT, metrics(SM_CYSCREEN) - 80)
+def window_box():
+    """Положение и размер окна в логических точках: посередине и так, чтобы оно влезало в экран
+    ноутбука вместе с панелью задач. Сама Windows ставит новое окно лесенкой, иногда за край экрана."""
+    user32 = ctypes.windll.user32
+    scale = user32.GetDpiForSystem() / 96
+    screen_width = int(user32.GetSystemMetrics(SM_CXSCREEN) / scale)
+    screen_height = int(user32.GetSystemMetrics(SM_CYSCREEN) / scale)
+    width, height = fit_window(screen_width, screen_height)
+    return (screen_width - width) // 2, (screen_height - TASKBAR_HEIGHT - height) // 2, width, height
+
+
+def fit_window(screen_width, screen_height):
+    return min(WINDOW_WIDTH, screen_width - 40), min(WINDOW_HEIGHT, screen_height - TASKBAR_HEIGHT - 20)
 
 
 # --- Автозапуск
@@ -175,9 +185,9 @@ class Desktop:
         if winforms.renderer != "edgechromium":
             raise RuntimeError("Не найден WebView2")
         webview.settings["ALLOW_DOWNLOADS"] = True  # чтобы работала кнопка «Скачать» у бэкапа
-        width, height = window_size()
-        self.window = webview.create_window(APP_NAME, self.url, width=width, height=height, min_size=(720, 520),
-                                            hidden=hidden, background_color="#15171a")
+        x, y, width, height = window_box()
+        self.window = webview.create_window(APP_NAME, self.url, x=x, y=y, width=width, height=height,
+                                            min_size=(720, 520), hidden=hidden, background_color="#15171a")
         self.window.events.before_show += self._on_form_created
         print("Окно: WebView2", flush=True)
         webview.start(private_mode=False, storage_path=str(DATA / "webview"))
