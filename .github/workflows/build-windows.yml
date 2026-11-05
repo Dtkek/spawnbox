@@ -1,6 +1,6 @@
 # Сборка для Windows: приложение и установщик SpawnboxSetup.exe, Python не нужен.
 # Собирается на каждый push в main и обновляет релиз с тегом latest.
-# Данные приложения живут в %LOCALAPPDATA%\Spawnbox, см. app/spawnbox/config.py.
+# Где живут данные приложения, см. app/spawnbox/config.py.
 name: Сборка для Windows
 
 on:
@@ -86,5 +86,5 @@ jobs:
             Автоматическая сборка из main (${{ github.sha }}), версия ${{ env.APP_VERSION }}.
             Скачай `SpawnboxSetup.exe` и запусти его. Python и права администратора не нужны.
             Обновление: запусти новый установщик поверх старого, миры останутся.
-            Данные (миры, бэкапы, Java) лежат в `%LOCALAPPDATA%\Spawnbox`.
+            Где лежат миры и бэкапы, показано в приложении на вкладке «Настройки».
           files: dist/SpawnboxSetup.exe
